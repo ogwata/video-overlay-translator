@@ -1,0 +1,38 @@
+# --- Claude Code: 個人/環境固有（コミットしない） ---
+CLAUDE.local.md
+.claude/settings.local.json
+
+# --- 環境変数・秘匿値 ---
+.env
+.env.local
+*.local
+
+# --- 証明書・鍵 ---
+*.key
+*.pem
+*.crt
+*.p12
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# --- Node / 拡張ビルド ---
+node_modules/
+dist/
+build/
+*.zip
+
+# --- OS / エディタ ---
+.DS_Store
+.vscode/
+.idea/
+
+# --- モデル・大容量成果物 ---
+*.bin
+*.onnx
+*.safetensors
+models/

@@ -1,0 +1,21 @@
+/* 透明オーバーレイ。動画の上に重ねるだけで、ページや動画には干渉しない。 */
+#vot-overlay {
+  position: fixed;
+  left: 50%;
+  bottom: 8vh;
+  transform: translateX(-50%);
+  max-width: 80vw;
+  padding: 0.3em 0.8em;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: clamp(16px, 2.4vw, 30px);
+  line-height: 1.4;
+  text-align: center;
+  pointer-events: none; /* クリックを下の動画に通す */
+  z-index: 2147483647;
+  white-space: pre-wrap;
+}
+#vot-overlay:empty { display: none; }
+#vot-overlay[data-status="interim"] { opacity: 0.6; }   /* 暫定=薄字 */
+#vot-overlay[data-status="final"]   { opacity: 1; }      /* 確定=濃字 */

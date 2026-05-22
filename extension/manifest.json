@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Video Overlay Translator",
+  "version": "0.1.0",
+  "description": "再生中の動画音声をローカルGPUで和訳し、透明オーバーレイで重ねて表示する。",
+  "permissions": ["tabCapture", "offscreen", "activeTab", "scripting", "storage"],
+  "host_permissions": ["wss://*.ts.net/*", "https://*.ts.net/*"],
+  "background": {
+    "service_worker": "src/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "和訳オーバーレイ ON/OFF"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content-script.js"],
+      "css": ["src/overlay.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

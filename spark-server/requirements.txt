@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+# STT/MT 段で追加予定:
+# faster-whisper
+# （vLLM は別コンテナ/別プロセスで常駐させる想定）
