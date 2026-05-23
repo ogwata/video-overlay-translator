@@ -120,6 +120,7 @@ async def translate(ws: WebSocket):
     await ws.accept()
     # 接続ごとのモデル切替を許す。?model=qwen2.5:14b 等。未指定は env デフォルト。
     requested_model = ws.query_params.get("model") or VLLM_MODEL
+    print(f"[vot] WS connect: model={requested_model}", flush=True)
 
     # ffmpeg を streaming で起動。stdin に webm を流し続け、stdout から PCM が出続ける。
     ff = await asyncio.create_subprocess_exec(
@@ -149,7 +150,7 @@ async def translate(ws: WebSocket):
         except WebSocketDisconnect:
             pass
         except Exception as e:
-            print(f"[vot] feed_ffmpeg: {type(e).__name__}: {e}")
+            print(f"[vot] feed_ffmpeg: {type(e).__name__}: {e}", flush=True)
         finally:
             stop.set()
             try:
@@ -170,7 +171,7 @@ async def translate(ws: WebSocket):
                     if pcm.size > MAX_PCM_SAMPLES:
                         pcm = pcm[-MAX_PCM_SAMPLES:]
         except Exception as e:
-            print(f"[vot] read_pcm: {type(e).__name__}: {e}")
+            print(f"[vot] read_pcm: {type(e).__name__}: {e}", flush=True)
         finally:
             stop.set()
 
@@ -192,7 +193,7 @@ async def translate(ws: WebSocket):
                 except Exception:
                     break
         except Exception as e:
-            print(f"[vot] emit_loop: {type(e).__name__}: {e}")
+            print(f"[vot] emit_loop: {type(e).__name__}: {e}", flush=True)
         finally:
             stop.set()
 
@@ -265,7 +266,7 @@ async def translate_to_ja(text: str, model: str) -> str:
             ja = resp.json()["choices"][0]["message"]["content"].strip()
             return ja or text
     except Exception as e:
-        print(f"[vot] translate_to_ja failed: {type(e).__name__}: {e}")
+        print(f"[vot] translate_to_ja failed: {type(e).__name__}: {e}", flush=True)
         return text
 
 
