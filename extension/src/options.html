@@ -3,17 +3,28 @@
 <title>Video Overlay Translator — Options</title>
 <style>
   body { font: 14px system-ui, sans-serif; max-width: 560px; margin: 1.5em auto; padding: 0 1em; }
-  label { display: block; margin-bottom: 0.4em; font-weight: 600; }
-  input { width: 100%; box-sizing: border-box; padding: 0.4em; font-family: ui-monospace, monospace; font-size: 13px; }
+  label { display: block; margin-top: 1em; margin-bottom: 0.4em; font-weight: 600; }
+  input, select { width: 100%; box-sizing: border-box; padding: 0.4em; font-family: ui-monospace, monospace; font-size: 13px; }
   .help { color: #666; font-size: 12px; margin-top: 0.3em; }
-  button { margin-top: 1em; padding: 0.4em 1em; }
+  .row { display: flex; gap: 0.5em; align-items: stretch; }
+  .row select { flex: 1; }
+  button { padding: 0.4em 1em; cursor: pointer; }
+  .save { margin-top: 1.2em; }
   .status { margin-top: 1em; color: #16a34a; min-height: 1em; }
 </style>
 <form id="f">
   <label for="url">Spark WSS URL</label>
   <input id="url" name="url" type="text" placeholder="wss://<host>.<tailnet>.ts.net/translate" autocomplete="off">
   <div class="help">Tailscale serve で 443 終端した WSS URL。例: <code>wss://&lt;host&gt;.&lt;tailnet&gt;.ts.net/translate</code></div>
-  <button type="submit">Save</button>
+
+  <label for="model">Translation model</label>
+  <div class="row">
+    <select id="model" name="model"></select>
+    <button type="button" id="refreshModels" title="Spark の /models から再取得">↻</button>
+  </div>
+  <div class="help">URL を Save 後に Spark の <code>/models</code> から取得した一覧。↻ で再取得。</div>
+
+  <button class="save" type="submit">Save</button>
   <div class="status" id="status"></div>
 </form>
 <script src="options.js"></script>

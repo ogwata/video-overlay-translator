@@ -55,10 +55,21 @@ chrome.action.onClicked.addListener(async (tab) => {
   }
 
   // URL は SW 側で読む（offscreen から chrome.storage に届かないケースを避ける）。
-  const { sparkWssUrl } = await chrome.storage.local.get("sparkWssUrl");
+  const { sparkWssUrl, sparkModel } = await chrome.storage.local.get([
+    "sparkWssUrl",
+    "sparkModel",
+  ]);
   if (!sparkWssUrl) {
     await chrome.runtime.openOptionsPage();
     return;
+  }
+
+  // 選択されたモデルがあれば ?model= で接続ごとに指定。空ならサーバの env デフォルト。
+  let url = sparkWssUrl;
+  if (sparkModel) {
+    const u = new URL(sparkWssUrl);
+    u.searchParams.set("model", sparkModel);
+    url = u.toString();
   }
 
   await ensureOffscreen();
@@ -68,7 +79,7 @@ chrome.action.onClicked.addListener(async (tab) => {
     type: "START_CAPTURE",
     streamId,
     tabId: tab.id,
-    url: sparkWssUrl,
+    url,
   });
   await setActiveTabId(tab.id);
   await setBadge(tab.id, true);
