@@ -5,42 +5,49 @@
 
 let ws = null;
 let recorder = null;
+let stream = null;
+let audioCtx = null;
 let currentTabId = null;
 
-// Spark の WSS URL は storage 経由で設定（実値は .env / CLAUDE.local.md と一致）。
-async function getSparkUrl() {
-  const { sparkWssUrl } = await chrome.storage.local.get("sparkWssUrl");
-  // TODO: 未設定時の扱い。例: options ページで設定させる。
-  return sparkWssUrl; // 例: wss://spark-host.<tailnet>.ts.net:8000/translate
-}
-
-chrome.runtime.onMessage.addListener(async (msg) => {
+chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === "START_CAPTURE") {
     currentTabId = msg.tabId;
-    await startCapture(msg.streamId);
+    startCapture(msg.streamId, msg.url).catch((err) => {
+      console.error("[vot/offscreen] startCapture failed:", err);
+    });
   } else if (msg?.type === "STOP") {
     stopCapture();
   }
 });
 
-async function startCapture(streamId) {
-  const stream = await navigator.mediaDevices.getUserMedia({
+async function startCapture(streamId, url) {
+  if (!url) {
+    console.error("[vot/offscreen] Spark WSS URL が渡ってきていません。");
+    return;
+  }
+
+  stream = await navigator.mediaDevices.getUserMedia({
     audio: { mandatory: { chromeMediaSource: "tab", chromeMediaSourceId: streamId } },
     video: false,
   });
 
-  const url = await getSparkUrl();
+  // tabCapture の音声はキャプチャ側に流れる代わりにタブのスピーカー出力が止まる。
+  // そのままだとユーザに動画音声が聞こえなくなるので、WebAudio でスピーカーに戻す。
+  audioCtx = new AudioContext();
+  audioCtx.createMediaStreamSource(stream).connect(audioCtx.destination);
+
   ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
+  ws.onopen = () => console.info("[vot/offscreen] WSS open:", url);
+  ws.onerror = (e) => console.error("[vot/offscreen] WSS error:", e);
+  ws.onclose = (e) => console.info("[vot/offscreen] WSS close:", e.code, e.reason);
   ws.onmessage = (ev) => {
     // the Spark からの和訳。{ status, text } を想定。
     const data = JSON.parse(ev.data);
     chrome.runtime.sendMessage({ type: "TRANSLATION", tabId: currentTabId, ...data });
   };
 
-  // TODO: MediaRecorder(opus) でチャンク化し ws.send。
-  //       VAD 区切り or 時間窓は未決定（HANDOVER 9）。最初のマイルストーンでは
-  //       生チャンクをそのまま送ってエコーが返ることだけ確認すれば良い。
+  // MediaRecorder(opus) で時間窓チャンク。VAD 区切りは将来対応（HANDOVER 9）。
   recorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
   recorder.ondataavailable = async (e) => {
     if (ws?.readyState === WebSocket.OPEN && e.data.size > 0) {
@@ -51,8 +58,13 @@ async function startCapture(streamId) {
 }
 
 function stopCapture() {
-  recorder?.stop();
+  try { recorder?.stop(); } catch {}
   recorder = null;
-  ws?.close();
+  stream?.getTracks().forEach((t) => t.stop());
+  stream = null;
+  audioCtx?.close().catch(() => {});
+  audioCtx = null;
+  try { ws?.close(); } catch {}
   ws = null;
+  currentTabId = null;
 }
