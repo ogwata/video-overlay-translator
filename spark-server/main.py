@@ -38,7 +38,7 @@ def get_asr():
             "automatic-speech-recognition",
             model=WHISPER_MODEL,
             device=WHISPER_DEVICE,
-            torch_dtype=_DTYPES.get(WHISPER_DTYPE, torch.float16),
+            dtype=_DTYPES.get(WHISPER_DTYPE, torch.float16),
         )
     return _asr
 
@@ -109,18 +109,25 @@ def transcribe_new(webm_bytes: bytes, since_end: float) -> tuple[str, float]:
 
 
 def webm_to_pcm(webm_bytes: bytes) -> np.ndarray:
-    """webm/opus を mono 16kHz float32 PCM に ffmpeg で変換。"""
+    """webm/opus を mono 16kHz float32 PCM に ffmpeg で変換。
+
+    `-f webm` で stdin パイプ食わせると EBML パースに失敗するケースがあるため、
+    親フォーマットの matroska デマクサに任せ、container エラーに寛容な flags を付ける。
+    """
     proc = subprocess.run(
         [
             "ffmpeg", "-loglevel", "error",
-            "-f", "webm", "-i", "pipe:0",
+            "-fflags", "+discardcorrupt+nobuffer",
+            "-f", "matroska", "-i", "pipe:0",
             "-ac", "1", "-ar", str(SAMPLE_RATE),
             "-f", "s16le", "pipe:1",
         ],
         input=webm_bytes, capture_output=True, check=False,
     )
-    if proc.returncode != 0:
-        print(f"[vot] ffmpeg failed: {proc.stderr[:500].decode('utf-8', errors='replace')}")
+    if proc.returncode != 0 or not proc.stdout:
+        head = webm_bytes[:16].hex(" ")
+        msg = proc.stderr[:400].decode("utf-8", errors="replace").replace("\n", " ").strip()
+        print(f"[vot] ffmpeg failed (in={len(webm_bytes)}B head={head}): {msg}")
         return np.zeros(0, dtype=np.float32)
     return np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
 
