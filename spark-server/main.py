@@ -8,6 +8,7 @@
 import asyncio
 import os
 import subprocess
+import httpx
 import numpy as np
 import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -18,6 +19,17 @@ WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
 WHISPER_DTYPE = os.getenv("WHISPER_DTYPE", "float16")
 STT_WINDOW_SEC = float(os.getenv("STT_WINDOW_SEC", "5.0"))
 SAMPLE_RATE = 16000  # Whisper 入力レート固定。
+
+# 翻訳段 (vLLM の OpenAI 互換エンドポイント)。未設定なら原語のまま返す。
+VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "")  # 例: http://127.0.0.1:8001/v1
+VLLM_MODEL = os.getenv("VLLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+VLLM_TIMEOUT_SEC = float(os.getenv("VLLM_TIMEOUT_SEC", "20.0"))
+TRANSLATE_SYSTEM_PROMPT = (
+    "あなたは多言語→日本語のライブ字幕翻訳者です。"
+    "入力テキストを自然な日本語に訳して、訳文のみを返してください。"
+    "前置きや注釈、引用符は付けないでください。"
+    "入力が既に日本語の場合はそのまま返してください。"
+)
 
 app = FastAPI(title="video-overlay-translator gateway")
 
@@ -45,7 +57,13 @@ def get_asr():
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "model": WHISPER_MODEL, "device": WHISPER_DEVICE}
+    return {
+        "ok": True,
+        "stt_model": WHISPER_MODEL,
+        "device": WHISPER_DEVICE,
+        "mt_base_url": VLLM_BASE_URL or "(disabled)",
+        "mt_model": VLLM_MODEL,
+    }
 
 
 @app.websocket("/translate")
@@ -67,12 +85,38 @@ async def translate(ws: WebSocket):
                 transcribe_new, bytes(chunks), last_seg_end
             )
             if new_text:
-                # TODO(MT): vLLM(Qwen) で和訳。今は原語のまま返す。
+                ja_text = await translate_to_ja(new_text)
                 # TODO: interim/final 2段化 (HANDOVER 9)。今は final 一本。
-                await ws.send_json({"status": "final", "text": new_text})
+                await ws.send_json({"status": "final", "text": ja_text})
             last_emit_at = now
     except WebSocketDisconnect:
         pass
+
+
+async def translate_to_ja(text: str) -> str:
+    """vLLM の OpenAI 互換 chat endpoint に投げて和訳。失敗時は原文をそのまま返す。"""
+    if not VLLM_BASE_URL:
+        return text  # 翻訳未設定時はパススルー
+    try:
+        async with httpx.AsyncClient(timeout=VLLM_TIMEOUT_SEC) as client:
+            resp = await client.post(
+                f"{VLLM_BASE_URL.rstrip('/')}/chat/completions",
+                json={
+                    "model": VLLM_MODEL,
+                    "messages": [
+                        {"role": "system", "content": TRANSLATE_SYSTEM_PROMPT},
+                        {"role": "user", "content": text},
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 256,
+                },
+            )
+            resp.raise_for_status()
+            ja = resp.json()["choices"][0]["message"]["content"].strip()
+            return ja or text
+    except Exception as e:
+        print(f"[vot] translate_to_ja failed: {type(e).__name__}: {e}")
+        return text  # fallback: 原語のまま
 
 
 def transcribe_new(webm_bytes: bytes, since_end: float) -> tuple[str, float]:
