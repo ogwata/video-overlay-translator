@@ -1,13 +1,14 @@
 # main.py — the Spark 上で動く推論ゲートウェイ。
-# STT 段: transformers + PyTorch で Whisper を CUDA 実行。
-# 翻訳段(vLLM/Qwen) は次ステージで差し込む。
+# STT: transformers + PyTorch で Whisper を CUDA 実行。
+# MT:  OpenAI 互換 chat endpoint (vLLM / Ollama) に投げて和訳。
 #
-# faster-whisper(CTranslate2) の aarch64 wheel に CUDA が同梱されておらず、
-# DGX Spark (Grace ARM64) では GPU を引けないため、transformers パイプラインに移行。
+# Audio path: WSS で受けた webm/opus を ffmpeg のストリーミング subprocess に流し続け、
+# stdout から PCM(s16le, 16kHz, mono) を連続で読んでリングバッファに積む。
+# 一定周期で最新の数秒だけを取り出して Whisper にかけることで、セッションが長くなっても
+# 計算量が線形に伸びない。
 
 import asyncio
 import os
-import subprocess
 import httpx
 import numpy as np
 import torch
@@ -17,18 +18,25 @@ from transformers import pipeline
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "openai/whisper-large-v3")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
 WHISPER_DTYPE = os.getenv("WHISPER_DTYPE", "float16")
-STT_WINDOW_SEC = float(os.getenv("STT_WINDOW_SEC", "5.0"))
+STT_WINDOW_SEC = float(os.getenv("STT_WINDOW_SEC", "5.0"))     # 何秒ごとに転写を発火するか
+STT_CONTEXT_SEC = float(os.getenv("STT_CONTEXT_SEC", "8.0"))   # 1回の転写で渡す PCM の長さ
+PCM_BUFFER_SEC = float(os.getenv("PCM_BUFFER_SEC", "30.0"))    # リングバッファの長さ
 SAMPLE_RATE = 16000  # Whisper 入力レート固定。
+MAX_PCM_SAMPLES = int(SAMPLE_RATE * PCM_BUFFER_SEC)
+CONTEXT_SAMPLES = int(SAMPLE_RATE * STT_CONTEXT_SEC)
 
-# 翻訳段 (vLLM の OpenAI 互換エンドポイント)。未設定なら原語のまま返す。
-VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "")  # 例: http://127.0.0.1:8001/v1
-VLLM_MODEL = os.getenv("VLLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+# 翻訳段 (vLLM / Ollama の OpenAI 互換エンドポイント)。未設定なら原語のまま返す。
+VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "")  # 例: http://127.0.0.1:11434/v1
+VLLM_MODEL = os.getenv("VLLM_MODEL", "qwen2.5:7b")
 VLLM_TIMEOUT_SEC = float(os.getenv("VLLM_TIMEOUT_SEC", "20.0"))
 TRANSLATE_SYSTEM_PROMPT = (
-    "あなたは多言語→日本語のライブ字幕翻訳者です。"
-    "入力テキストを自然な日本語に訳して、訳文のみを返してください。"
-    "前置きや注釈、引用符は付けないでください。"
-    "入力が既に日本語の場合はそのまま返してください。"
+    "あなたは多言語→日本語のライブ字幕翻訳者です。\n"
+    "ルール:\n"
+    "- 入力テキストを自然な日本語に訳し、訳文のみを返す。\n"
+    "- 出力は日本語のみ。中国語・韓国語・その他の言語の文字を絶対に混ぜない。\n"
+    "- 前置き、注釈、引用符、説明は一切付けない。\n"
+    "- 入力が既に日本語ならそのまま返す。\n"
+    "- 入力が意味をなさない断片なら、最も自然な日本語の断片で返す。"
 )
 
 app = FastAPI(title="video-overlay-translator gateway")
@@ -69,34 +77,113 @@ def healthz():
 @app.websocket("/translate")
 async def translate(ws: WebSocket):
     await ws.accept()
-    chunks = bytearray()
-    loop = asyncio.get_running_loop()
-    last_emit_at = loop.time()
-    last_seg_end = 0.0  # これまで返したセグメントの最大 end (秒)
 
+    # ffmpeg を streaming で起動。stdin に webm を流し続け、stdout から PCM が出続ける。
+    ff = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-loglevel", "error",
+        "-fflags", "+discardcorrupt+nobuffer",
+        "-f", "matroska", "-i", "pipe:0",
+        "-ac", "1", "-ar", str(SAMPLE_RATE),
+        "-f", "s16le", "pipe:1",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+
+    pcm = np.zeros(0, dtype=np.int16)
+    pcm_lock = asyncio.Lock()
+    stop = asyncio.Event()
+
+    async def feed_ffmpeg() -> None:
+        try:
+            while not stop.is_set():
+                chunk = await ws.receive_bytes()
+                if ff.stdin.is_closing():
+                    break
+                ff.stdin.write(chunk)
+                await ff.stdin.drain()
+        except WebSocketDisconnect:
+            pass
+        except Exception as e:
+            print(f"[vot] feed_ffmpeg: {type(e).__name__}: {e}")
+        finally:
+            stop.set()
+            try:
+                ff.stdin.close()
+            except Exception:
+                pass
+
+    async def read_pcm() -> None:
+        nonlocal pcm
+        try:
+            while not stop.is_set():
+                raw = await ff.stdout.read(8192)
+                if not raw:
+                    break
+                arr = np.frombuffer(raw, dtype=np.int16)
+                async with pcm_lock:
+                    pcm = np.concatenate([pcm, arr])
+                    if pcm.size > MAX_PCM_SAMPLES:
+                        pcm = pcm[-MAX_PCM_SAMPLES:]
+        except Exception as e:
+            print(f"[vot] read_pcm: {type(e).__name__}: {e}")
+        finally:
+            stop.set()
+
+    async def emit_loop() -> None:
+        try:
+            while not stop.is_set():
+                await asyncio.sleep(STT_WINDOW_SEC)
+                async with pcm_lock:
+                    if pcm.size < SAMPLE_RATE:  # <1秒分しか無ければ待つ
+                        continue
+                    buf = pcm[-CONTEXT_SAMPLES:].copy()
+                audio = buf.astype(np.float32) / 32768.0
+                text = await asyncio.to_thread(transcribe_pcm, audio)
+                if not text:
+                    continue
+                ja = await translate_to_ja(text)
+                try:
+                    await ws.send_json({"status": "final", "text": ja})
+                except Exception:
+                    break
+        except Exception as e:
+            print(f"[vot] emit_loop: {type(e).__name__}: {e}")
+        finally:
+            stop.set()
+
+    tasks = [
+        asyncio.create_task(feed_ffmpeg()),
+        asyncio.create_task(read_pcm()),
+        asyncio.create_task(emit_loop()),
+    ]
     try:
-        while True:
-            chunk = await ws.receive_bytes()
-            chunks.extend(chunk)
-            now = loop.time()
-            if now - last_emit_at < STT_WINDOW_SEC:
-                continue
-            new_text, last_seg_end = await asyncio.to_thread(
-                transcribe_new, bytes(chunks), last_seg_end
-            )
-            if new_text:
-                ja_text = await translate_to_ja(new_text)
-                # TODO: interim/final 2段化 (HANDOVER 9)。今は final 一本。
-                await ws.send_json({"status": "final", "text": ja_text})
-            last_emit_at = now
-    except WebSocketDisconnect:
-        pass
+        await stop.wait()
+    finally:
+        for t in tasks:
+            t.cancel()
+        try:
+            ff.terminate()
+            await asyncio.wait_for(ff.wait(), timeout=2.0)
+        except Exception:
+            try:
+                ff.kill()
+            except Exception:
+                pass
+
+
+def transcribe_pcm(audio: np.ndarray) -> str:
+    """短い PCM (<= STT_CONTEXT_SEC 秒) を Whisper で転写。"""
+    asr = get_asr()
+    result = asr({"array": audio, "sampling_rate": SAMPLE_RATE})
+    return (result.get("text") or "").strip()
 
 
 async def translate_to_ja(text: str) -> str:
-    """vLLM の OpenAI 互換 chat endpoint に投げて和訳。失敗時は原文をそのまま返す。"""
+    """OpenAI 互換 chat endpoint に投げて和訳。失敗時は原文をそのまま返す。"""
     if not VLLM_BASE_URL:
-        return text  # 翻訳未設定時はパススルー
+        return text
     try:
         async with httpx.AsyncClient(timeout=VLLM_TIMEOUT_SEC) as client:
             resp = await client.post(
@@ -107,7 +194,7 @@ async def translate_to_ja(text: str) -> str:
                         {"role": "system", "content": TRANSLATE_SYSTEM_PROMPT},
                         {"role": "user", "content": text},
                     ],
-                    "temperature": 0.3,
+                    "temperature": 0.2,
                     "max_tokens": 256,
                 },
             )
@@ -116,64 +203,7 @@ async def translate_to_ja(text: str) -> str:
             return ja or text
     except Exception as e:
         print(f"[vot] translate_to_ja failed: {type(e).__name__}: {e}")
-        return text  # fallback: 原語のまま
-
-
-def transcribe_new(webm_bytes: bytes, since_end: float) -> tuple[str, float]:
-    """蓄積した webm 全体を PCM へデコード→転写し、since_end より後だけ返す。
-
-    再デコードは無駄が大きいが、まずは結線確認のための素直な実装。
-    長時間で遅くなったら ffmpeg ストリーム + PCM リングバッファに移行する。
-    """
-    if not webm_bytes:
-        return "", since_end
-    audio = webm_to_pcm(webm_bytes)
-    if audio.size < SAMPLE_RATE:  # 1秒未満ならスキップ
-        return "", since_end
-    asr = get_asr()
-    result = asr(
-        {"array": audio, "sampling_rate": SAMPLE_RATE},
-        chunk_length_s=30,    # 内部チャンキング。長音声でも OOM しない。
-        batch_size=8,
-        return_timestamps=True,
-    )
-    new_parts: list[str] = []
-    new_end = since_end
-    for ch in result.get("chunks", []):
-        start, end = ch.get("timestamp", (None, None))
-        if start is None:
-            continue
-        if start >= since_end:
-            t = (ch.get("text") or "").strip()
-            if t:
-                new_parts.append(t)
-            if end is not None:
-                new_end = max(new_end, end)
-    return " ".join(new_parts), new_end
-
-
-def webm_to_pcm(webm_bytes: bytes) -> np.ndarray:
-    """webm/opus を mono 16kHz float32 PCM に ffmpeg で変換。
-
-    `-f webm` で stdin パイプ食わせると EBML パースに失敗するケースがあるため、
-    親フォーマットの matroska デマクサに任せ、container エラーに寛容な flags を付ける。
-    """
-    proc = subprocess.run(
-        [
-            "ffmpeg", "-loglevel", "error",
-            "-fflags", "+discardcorrupt+nobuffer",
-            "-f", "matroska", "-i", "pipe:0",
-            "-ac", "1", "-ar", str(SAMPLE_RATE),
-            "-f", "s16le", "pipe:1",
-        ],
-        input=webm_bytes, capture_output=True, check=False,
-    )
-    if proc.returncode != 0 or not proc.stdout:
-        head = webm_bytes[:16].hex(" ")
-        msg = proc.stderr[:400].decode("utf-8", errors="replace").replace("\n", " ").strip()
-        print(f"[vot] ffmpeg failed (in={len(webm_bytes)}B head={head}): {msg}")
-        return np.zeros(0, dtype=np.float32)
-    return np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+        return text
 
 
 if __name__ == "__main__":
