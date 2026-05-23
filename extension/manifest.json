@@ -10,7 +10,8 @@
     "type": "module"
   },
   "action": {
-    "default_title": "和訳オーバーレイ ON/OFF"
+    "default_title": "Video Overlay Translator",
+    "default_popup": "src/popup.html"
   },
   "options_ui": {
     "page": "src/options.html",

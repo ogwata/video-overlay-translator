@@ -1,6 +1,6 @@
 // service-worker.js
-// 役割: ツールバー操作の受付、offscreen document のライフサイクル管理、
-//       tabCapture の streamId 取得、content script との橋渡し。
+// 役割: popup からの開始/停止指示を受けて offscreen のライフサイクルを回し、
+//       offscreen からの和訳を対象タブの content script へ転送する。
 // ネットワーク(WSS)処理そのものは offscreen 側に集約する（CLAUDE.md ガード3）。
 
 const OFFSCREEN_PATH = "src/offscreen.html";
@@ -36,25 +36,7 @@ async function setBadge(tabId, on) {
   if (on) await chrome.action.setBadgeBackgroundColor({ color: "#16a34a" });
 }
 
-chrome.action.onClicked.addListener(async (tab) => {
-  const active = await getActiveTabId();
-
-  if (active === tab.id) {
-    // 同じタブで再クリック → OFF
-    await chrome.runtime.sendMessage({ type: "STOP" }).catch(() => {});
-    if (await hasOffscreen()) await chrome.offscreen.closeDocument();
-    await setBadge(tab.id, false);
-    await setActiveTabId(null);
-    return;
-  }
-
-  if (active != null) {
-    // 別タブで起動中なら先に止める
-    await chrome.runtime.sendMessage({ type: "STOP" }).catch(() => {});
-    await setBadge(active, false);
-  }
-
-  // URL は SW 側で読む（offscreen から chrome.storage に届かないケースを避ける）。
+async function startCaptureWithStreamId(tabId, streamId) {
   const { sparkWssUrl, sparkModel } = await chrome.storage.local.get([
     "sparkWssUrl",
     "sparkModel",
@@ -64,7 +46,6 @@ chrome.action.onClicked.addListener(async (tab) => {
     return;
   }
 
-  // 選択されたモデルがあれば ?model= で接続ごとに指定。空ならサーバの env デフォルト。
   let url = sparkWssUrl;
   if (sparkModel) {
     const u = new URL(sparkWssUrl);
@@ -73,31 +54,59 @@ chrome.action.onClicked.addListener(async (tab) => {
   }
 
   await ensureOffscreen();
-  // getMediaStreamId はトップレベル user gesture が必要（action click は満たす）。
-  const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
   await chrome.runtime.sendMessage({
     type: "START_CAPTURE",
     streamId,
-    tabId: tab.id,
+    tabId,
     url,
   });
-  await setActiveTabId(tab.id);
-  await setBadge(tab.id, true);
-});
+  await setActiveTabId(tabId);
+  await setBadge(tabId, true);
+}
 
-// offscreen から届いた和訳テキストを、対象タブの content script へ転送するだけ。
-chrome.runtime.onMessage.addListener((msg) => {
+async function stopCapture() {
+  const active = await getActiveTabId();
+  await chrome.runtime.sendMessage({ type: "STOP" }).catch(() => {});
+  if (await hasOffscreen()) await chrome.offscreen.closeDocument();
+  if (active != null) await setBadge(active, false);
+  await setActiveTabId(null);
+}
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "TRANSLATION") {
-    // msg: { tabId, status: "interim"|"final", text }
+    // 対象タブの content script へ転送 + popup ライブ表示用に session に最新を残す。
     chrome.tabs.sendMessage(msg.tabId, msg).catch(() => {});
+    chrome.storage.session.set({
+      lastTranslation: { text: msg.text, status: msg.status, at: Date.now() },
+    });
+    return;
+  }
+  if (msg?.type === "GET_STATE") {
+    (async () => {
+      const activeTabId = await getActiveTabId();
+      const { lastTranslation } = await chrome.storage.session.get("lastTranslation");
+      sendResponse({ activeTabId, lastTranslation: lastTranslation ?? null });
+    })();
+    return true; // async sendResponse
+  }
+  if (msg?.type === "START_FROM_POPUP") {
+    (async () => {
+      const active = await getActiveTabId();
+      if (active != null && active !== msg.tabId) {
+        await stopCapture(); // 別タブで動いていたら止めて切替
+      }
+      await startCaptureWithStreamId(msg.tabId, msg.streamId);
+    })();
+    return;
+  }
+  if (msg?.type === "STOP_FROM_POPUP") {
+    stopCapture();
+    return;
   }
 });
 
 // 対象タブが閉じたら自動 OFF。
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   const active = await getActiveTabId();
-  if (tabId !== active) return;
-  await chrome.runtime.sendMessage({ type: "STOP" }).catch(() => {});
-  if (await hasOffscreen()) await chrome.offscreen.closeDocument();
-  await setActiveTabId(null);
+  if (tabId === active) await stopCapture();
 });
