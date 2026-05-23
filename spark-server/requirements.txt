@@ -1,5 +1,6 @@
 fastapi
 uvicorn[standard]
-# STT/MT 段で追加予定:
-# faster-whisper
-# （vLLM は別コンテナ/別プロセスで常駐させる想定）
+faster-whisper
+# システム依存: ffmpeg (apt install ffmpeg)。faster-whisper が内部で呼ぶ。
+# 翻訳段で追加予定（vLLM は別プロセス常駐想定）:
+# openai  # vLLM の OpenAI 互換クライアントとして
