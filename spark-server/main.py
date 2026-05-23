@@ -29,5 +29,6 @@ async def translate(ws: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    # tailscale serve で WSS 終端する前提なので、ここは平文 HTTP/WS で listen。
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # tailscale serve が 443 で WSS 終端し、ここへは 127.0.0.1 でフォワードする前提。
+    # 他NIC・Tailscale 直への平文露出を塞ぐためループバックに絞る。
+    uvicorn.run(app, host="127.0.0.1", port=8000)
