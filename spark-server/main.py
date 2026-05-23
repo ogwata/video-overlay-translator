@@ -31,13 +31,30 @@ VLLM_MODEL = os.getenv("VLLM_MODEL", "qwen2.5:7b")
 VLLM_TIMEOUT_SEC = float(os.getenv("VLLM_TIMEOUT_SEC", "20.0"))
 TRANSLATE_SYSTEM_PROMPT = (
     "あなたは多言語→日本語のライブ字幕翻訳者です。\n"
-    "ルール:\n"
+    "出力ルール（厳守）:\n"
     "- 入力テキストを自然な日本語に訳し、訳文のみを返す。\n"
-    "- 出力は日本語のみ。中国語・韓国語・その他の言語の文字を絶対に混ぜない。\n"
-    "- 前置き、注釈、引用符、説明は一切付けない。\n"
-    "- 入力が既に日本語ならそのまま返す。\n"
-    "- 入力が意味をなさない断片なら、最も自然な日本語の断片で返す。"
+    "- 出力は日本語のみ。英語・中国語・韓国語などの文字を絶対に混ぜない。\n"
+    "- 前置き、説明、注釈、引用符、メタコメント、独り言は一切付けない。\n"
+    "- 入力が文の途中で切れていても、原文以外の文字を生成しない。\n"
+    "- 入力が既に日本語ならそのまま返す。"
 )
+
+# Few-shot 例。小型モデル (Qwen2.5-7B 等) は出力フォーマットの一貫性に弱いので、
+# in-context で「英語のまま漏らさず・中国語に滑らず・メタコメント無し」を体得させる。
+TRANSLATE_FEWSHOT = [
+    (
+        "And the more successful ones spent the majority of their money on management productivity.",
+        "そしてより成功した人たちは、大部分のお金を経営の生産性に費やしました。",
+    ),
+    (
+        "He said the lesson from the Gulf War was that the best software will win the war.",
+        "彼は、湾岸戦争から得た教訓は、最良のソフトウェアが戦争に勝つということだと述べた。",
+    ),
+    (
+        "I think the best way to predict the future is to invent it.",
+        "未来を予測する最良の方法は、それを発明することだと思います。",
+    ),
+]
 
 app = FastAPI(title="video-overlay-translator gateway")
 
@@ -184,16 +201,18 @@ async def translate_to_ja(text: str) -> str:
     """OpenAI 互換 chat endpoint に投げて和訳。失敗時は原文をそのまま返す。"""
     if not VLLM_BASE_URL:
         return text
+    messages = [{"role": "system", "content": TRANSLATE_SYSTEM_PROMPT}]
+    for src, tgt in TRANSLATE_FEWSHOT:
+        messages.append({"role": "user", "content": src})
+        messages.append({"role": "assistant", "content": tgt})
+    messages.append({"role": "user", "content": text})
     try:
         async with httpx.AsyncClient(timeout=VLLM_TIMEOUT_SEC) as client:
             resp = await client.post(
                 f"{VLLM_BASE_URL.rstrip('/')}/chat/completions",
                 json={
                     "model": VLLM_MODEL,
-                    "messages": [
-                        {"role": "system", "content": TRANSLATE_SYSTEM_PROMPT},
-                        {"role": "user", "content": text},
-                    ],
+                    "messages": messages,
                     "temperature": 0.2,
                     "max_tokens": 256,
                 },
