@@ -1,0 +1,22 @@
+[Unit]
+Description=Video Overlay Translator gateway (Whisper STT + Ollama MT)
+After=network-online.target ollama.service
+Wants=network-online.target
+# ollama.service が居れば一緒に上がる。居なくても上がるよう Wants ではなく After のみで参照。
+
+[Service]
+Type=simple
+User=spark
+Group=spark
+WorkingDirectory=/home/spark/dev/video-overlay-translator/spark-server
+# .env から VLLM_BASE_URL / VLLM_MODEL / WHISPER_* / SILENCE_* を読む。
+EnvironmentFile=/home/spark/dev/video-overlay-translator/spark-server/.env
+ExecStart=/home/spark/dev/video-overlay-translator/spark-server/.venv/bin/python /home/spark/dev/video-overlay-translator/spark-server/main.py
+Restart=on-failure
+RestartSec=5
+# uvicorn の stdout/stderr を journal に流す。journalctl -u vot-gateway -f で追える。
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
