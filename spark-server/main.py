@@ -190,11 +190,29 @@ async def translate(ws: WebSocket):
                 pass
 
 
+SILENCE_RMS_THRESHOLD = float(os.getenv("SILENCE_RMS_THRESHOLD", "0.005"))
+# Whisper が無音/雑音から吐きがちな幻聴。これだけの出力は捨てる。
+WHISPER_HALLUCINATIONS = {
+    "you", "thank you.", "thanks for watching.", "thanks for watching!",
+    ".", "...", "Thank you.", "ご視聴ありがとうございました。",
+}
+
+
 def transcribe_pcm(audio: np.ndarray) -> str:
-    """短い PCM (<= STT_CONTEXT_SEC 秒) を Whisper で転写。"""
+    """短い PCM (<= STT_CONTEXT_SEC 秒) を Whisper で転写。
+
+    無音/雑音窓は Whisper が ``you`` などの幻聴を吐くため、RMS で早期に切る。
+    出力テキストも known-hallucination リストと突き合わせて捨てる。
+    """
+    rms = float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+    if rms < SILENCE_RMS_THRESHOLD:
+        return ""
     asr = get_asr()
     result = asr({"array": audio, "sampling_rate": SAMPLE_RATE})
-    return (result.get("text") or "").strip()
+    text = (result.get("text") or "").strip()
+    if text.lower() in {h.lower() for h in WHISPER_HALLUCINATIONS}:
+        return ""
+    return text
 
 
 async def translate_to_ja(text: str) -> str:
