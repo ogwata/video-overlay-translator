@@ -1,6 +1,12 @@
 fastapi
 uvicorn[standard]
-faster-whisper
-# システム依存: ffmpeg (apt install ffmpeg)。faster-whisper が内部で呼ぶ。
+transformers
+accelerate
+# システム依存: ffmpeg (apt install ffmpeg)。webm/opus -> PCM の変換に使う。
+#
+# torch は CUDA 対応のため別途インストール (DGX Spark = Grace ARM64 + Blackwell):
+#   .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cu126
+# Blackwell 対応のため torch >= 2.5 / CUDA >= 12.6 を使う。
+#
 # 翻訳段で追加予定（vLLM は別プロセス常駐想定）:
 # openai  # vLLM の OpenAI 互換クライアントとして

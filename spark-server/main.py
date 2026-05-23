@@ -1,31 +1,46 @@
 # main.py — the Spark 上で動く推論ゲートウェイ。
-# STT 段: faster-whisper(CUDA) で原語テキストを返す。
+# STT 段: transformers + PyTorch で Whisper を CUDA 実行。
 # 翻訳段(vLLM/Qwen) は次ステージで差し込む。
+#
+# faster-whisper(CTranslate2) の aarch64 wheel に CUDA が同梱されておらず、
+# DGX Spark (Grace ARM64) では GPU を引けないため、transformers パイプラインに移行。
 
 import asyncio
 import os
-import tempfile
+import subprocess
+import numpy as np
+import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from faster_whisper import WhisperModel
+from transformers import pipeline
 
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3")
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "openai/whisper-large-v3")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
-WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "float16")
+WHISPER_DTYPE = os.getenv("WHISPER_DTYPE", "float16")
 STT_WINDOW_SEC = float(os.getenv("STT_WINDOW_SEC", "5.0"))
+SAMPLE_RATE = 16000  # Whisper 入力レート固定。
 
 app = FastAPI(title="video-overlay-translator gateway")
 
+_DTYPES = {
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "float32": torch.float32,
+}
+
 # Lazy load: import が GPU 初期化で固まらないように初回リクエスト時に持つ。
-_model: WhisperModel | None = None
+_asr = None
 
 
-def get_model() -> WhisperModel:
-    global _model
-    if _model is None:
-        _model = WhisperModel(
-            WHISPER_MODEL, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE
+def get_asr():
+    global _asr
+    if _asr is None:
+        _asr = pipeline(
+            "automatic-speech-recognition",
+            model=WHISPER_MODEL,
+            device=WHISPER_DEVICE,
+            torch_dtype=_DTYPES.get(WHISPER_DTYPE, torch.float16),
         )
-    return _model
+    return _asr
 
 
 @app.get("/healthz")
@@ -61,38 +76,53 @@ async def translate(ws: WebSocket):
 
 
 def transcribe_new(webm_bytes: bytes, since_end: float) -> tuple[str, float]:
-    """蓄積した webm 全体を再デコード→転写し、since_end より後のセグメントだけ返す。
+    """蓄積した webm 全体を PCM へデコード→転写し、since_end より後だけ返す。
 
     再デコードは無駄が大きいが、まずは結線確認のための素直な実装。
-    長時間で遅くなったら ffmpeg のストリーム + PCM リングバッファに移行する。
+    長時間で遅くなったら ffmpeg ストリーム + PCM リングバッファに移行する。
     """
     if not webm_bytes:
         return "", since_end
-    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as f:
-        f.write(webm_bytes)
-        path = f.name
-    try:
-        model = get_model()
-        segments, _info = model.transcribe(
-            path,
-            language=None,        # 自動判定。動画の言語が混在しても対応。
-            vad_filter=False,     # 無音カットは後で
-            beam_size=1,          # 体感レイテンシ重視。品質が要れば 5 へ。
-        )
-        new_parts: list[str] = []
-        new_end = since_end
-        for seg in segments:
-            if seg.start >= since_end:
-                t = seg.text.strip()
-                if t:
-                    new_parts.append(t)
-                new_end = max(new_end, seg.end)
-        return " ".join(new_parts), new_end
-    finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+    audio = webm_to_pcm(webm_bytes)
+    if audio.size < SAMPLE_RATE:  # 1秒未満ならスキップ
+        return "", since_end
+    asr = get_asr()
+    result = asr(
+        {"array": audio, "sampling_rate": SAMPLE_RATE},
+        chunk_length_s=30,    # 内部チャンキング。長音声でも OOM しない。
+        batch_size=8,
+        return_timestamps=True,
+    )
+    new_parts: list[str] = []
+    new_end = since_end
+    for ch in result.get("chunks", []):
+        start, end = ch.get("timestamp", (None, None))
+        if start is None:
+            continue
+        if start >= since_end:
+            t = (ch.get("text") or "").strip()
+            if t:
+                new_parts.append(t)
+            if end is not None:
+                new_end = max(new_end, end)
+    return " ".join(new_parts), new_end
+
+
+def webm_to_pcm(webm_bytes: bytes) -> np.ndarray:
+    """webm/opus を mono 16kHz float32 PCM に ffmpeg で変換。"""
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-loglevel", "error",
+            "-f", "webm", "-i", "pipe:0",
+            "-ac", "1", "-ar", str(SAMPLE_RATE),
+            "-f", "s16le", "pipe:1",
+        ],
+        input=webm_bytes, capture_output=True, check=False,
+    )
+    if proc.returncode != 0:
+        print(f"[vot] ffmpeg failed: {proc.stderr[:500].decode('utf-8', errors='replace')}")
+        return np.zeros(0, dtype=np.float32)
+    return np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
 
 
 if __name__ == "__main__":
