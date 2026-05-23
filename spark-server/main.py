@@ -13,6 +13,7 @@ import httpx
 import numpy as np
 import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from transformers import pipeline
 
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "openai/whisper-large-v3")
@@ -58,6 +59,15 @@ TRANSLATE_FEWSHOT = [
 
 app = FastAPI(title="video-overlay-translator gateway")
 
+# 拡張 (chrome-extension://) から /models を読みに来るので CORS を開けておく。
+# Tailscale 内向きの secure context なので allow_origins=* で実害なし。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
 _DTYPES = {
     "float16": torch.float16,
     "bfloat16": torch.bfloat16,
@@ -91,9 +101,25 @@ def healthz():
     }
 
 
+@app.get("/models")
+async def list_models():
+    """Ollama / vLLM の /v1/models をそのままプロキシ。拡張のオプションでドロップダウン化する。"""
+    if not VLLM_BASE_URL:
+        return {"object": "list", "data": []}
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{VLLM_BASE_URL.rstrip('/')}/models")
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        return {"object": "list", "data": [], "error": f"{type(e).__name__}: {e}"}
+
+
 @app.websocket("/translate")
 async def translate(ws: WebSocket):
     await ws.accept()
+    # 接続ごとのモデル切替を許す。?model=qwen2.5:14b 等。未指定は env デフォルト。
+    requested_model = ws.query_params.get("model") or VLLM_MODEL
 
     # ffmpeg を streaming で起動。stdin に webm を流し続け、stdout から PCM が出続ける。
     ff = await asyncio.create_subprocess_exec(
@@ -160,7 +186,7 @@ async def translate(ws: WebSocket):
                 text = await asyncio.to_thread(transcribe_pcm, audio)
                 if not text:
                     continue
-                ja = await translate_to_ja(text)
+                ja = await translate_to_ja(text, requested_model)
                 try:
                     await ws.send_json({"status": "final", "text": ja})
                 except Exception:
@@ -215,7 +241,7 @@ def transcribe_pcm(audio: np.ndarray) -> str:
     return text
 
 
-async def translate_to_ja(text: str) -> str:
+async def translate_to_ja(text: str, model: str) -> str:
     """OpenAI 互換 chat endpoint に投げて和訳。失敗時は原文をそのまま返す。"""
     if not VLLM_BASE_URL:
         return text
@@ -229,7 +255,7 @@ async def translate_to_ja(text: str) -> str:
             resp = await client.post(
                 f"{VLLM_BASE_URL.rstrip('/')}/chat/completions",
                 json={
-                    "model": VLLM_MODEL,
+                    "model": model,
                     "messages": messages,
                     "temperature": 0.2,
                     "max_tokens": 256,
