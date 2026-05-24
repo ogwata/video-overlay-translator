@@ -47,8 +47,10 @@ TRANSLATE_SYSTEM_PROMPT = (
     "出力ルール（厳守）:\n"
     "- 入力テキストを自然な日本語に訳し、訳文のみを返す。\n"
     "- 出力は日本語のみ。英語・中国語・韓国語などの文字を絶対に混ぜない。\n"
-    "- 前置き、説明、注釈、引用符、メタコメント、独り言は一切付けない。\n"
-    "- 入力が文の途中で切れていても、原文以外の文字を生成しない。\n"
+    "- 前置き、説明、注釈、メタコメント、独り言は一切出さない。\n"
+    "- 「翻訳できません」「訳文が途中で切れているため」のような断り書きや解説は禁止。\n"
+    "- 入力が文の途中で切れていても、その断片を断片のまま自然な日本語で訳す。理由は書かない。\n"
+    "- 出力は引用符・括弧の注釈・記号で囲まない。\n"
     "- 入力が既に日本語ならそのまま返す。"
 )
 
@@ -72,6 +74,29 @@ WHISPER_HALLUCINATIONS = {
     "you", "thank you.", "thanks for watching.", "thanks for watching!",
     ".", "...", "Thank you.", "ご視聴ありがとうございました。",
 }
+
+# STT 出力に出てきても訳すに値しない filler。表記揺れを吸えるよう正規化して比較。
+STT_FILLERS = {
+    "uh", "um", "umm", "uhh", "ah", "ahh", "hmm", "mmm", "mm",
+    "oh", "ooh", "huh", "you know", "i mean", "like",
+    "ええと", "あの", "うん", "ああ", "うー", "んー", "んーと",
+}
+
+# LLM が漏らしがちなメタコメントの目印。これが訳文に含まれていたら原文 fallback。
+TRANSLATION_META_MARKERS = (
+    "（訳文",
+    "（翻訳",
+    "（注",
+    "(訳文",
+    "(翻訳",
+    "(注",
+    "翻訳できません",
+    "訳すことが",
+    "原文が",
+    "原文は",
+    "意味が不明",
+    "意味が取れない",
+)
 
 app = FastAPI(title="video-overlay-translator gateway")
 app.add_middleware(
@@ -240,6 +265,9 @@ async def translate(ws: WebSocket):
                     if not text:
                         continue
                     ja = await translate_to_ja(text, requested_model)
+                    if not ja:
+                        # メタコメントを弾いた場合などは何も送らない。
+                        continue
                     try:
                         await ws.send_json({"status": "final", "text": ja})
                     except Exception:
@@ -292,7 +320,14 @@ def transcribe_pcm(audio: np.ndarray) -> str:
     asr = get_asr()
     result = asr({"array": audio, "sampling_rate": SAMPLE_RATE})
     text = (result.get("text") or "").strip()
-    if text.lower() in {h.lower() for h in WHISPER_HALLUCINATIONS}:
+    # 句読点を剥がして単語ベースで filler 判定。
+    bare = text.lower().rstrip(".,!?！？。、").strip()
+    if bare in {h.lower() for h in WHISPER_HALLUCINATIONS}:
+        return ""
+    if bare in STT_FILLERS:
+        return ""
+    # 短すぎる出力は filler の可能性が高く、字幕表示の邪魔になるだけ。
+    if len(bare) < 3:
         return ""
     return text
 
@@ -329,6 +364,10 @@ async def translate_to_ja(text: str, model: str) -> str:
                     flush=True,
                 )
                 return text
+            # メタコメント・断り書きが混入した場合は字幕に出さない。
+            if any(marker in ja for marker in TRANSLATION_META_MARKERS):
+                print(f"[vot] meta leak: {ja[:80]}", flush=True)
+                return ""
             return ja
     except Exception as e:
         print(f"[vot] translate_to_ja failed: {type(e).__name__}: {e}", flush=True)

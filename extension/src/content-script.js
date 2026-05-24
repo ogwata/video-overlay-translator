@@ -23,6 +23,8 @@ let showing = false;
 let currentText = "";
 
 function readingTimeMs(text) {
+  // 短い字幕は最低保証を緩める。filler を強引に 2 秒見せる必要は無い。
+  if (text.length <= 4) return 900;
   return Math.min(MAX_DISPLAY_MS, Math.max(MIN_DISPLAY_MS, text.length * PER_CHAR_MS));
 }
 
