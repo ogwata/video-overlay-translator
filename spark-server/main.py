@@ -250,7 +250,13 @@ async def translate_to_ja(text: str, model: str) -> str:
     for src, tgt in TRANSLATE_FEWSHOT:
         messages.append({"role": "user", "content": src})
         messages.append({"role": "assistant", "content": tgt})
-    messages.append({"role": "user", "content": text})
+    user_text = text
+    # Qwen3 系は thinking mode が既定で、reasoning が max_tokens を食い content が空になる。
+    # `/no_think` は Qwen3 のチャットテンプレートが拾う公式タグで、これを末尾に付ける
+    # と thinking を無効化できる。
+    if model.startswith("qwen3"):
+        user_text = f"{text} /no_think"
+    messages.append({"role": "user", "content": user_text})
     try:
         async with httpx.AsyncClient(timeout=VLLM_TIMEOUT_SEC) as client:
             resp = await client.post(
@@ -259,7 +265,7 @@ async def translate_to_ja(text: str, model: str) -> str:
                     "model": model,
                     "messages": messages,
                     "temperature": 0.2,
-                    "max_tokens": 256,
+                    "max_tokens": 512,
                 },
             )
             resp.raise_for_status()
