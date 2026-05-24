@@ -10,6 +10,7 @@
 
 import asyncio
 import os
+import re
 import httpx
 import numpy as np
 import torch
@@ -35,8 +36,8 @@ VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.5"))
 VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "400"))
 # 発話の最小長 (ms)
 VAD_MIN_SPEECH_MS = int(os.getenv("VAD_MIN_SPEECH_MS", "250"))
-# 1 発話の最大長 (s)。これより長い発話は強制で切る。
-VAD_MAX_UTTERANCE_SEC = float(os.getenv("VAD_MAX_UTTERANCE_SEC", "15.0"))
+# 1 発話の最大長 (s)。これより長い発話は完結を待たずチャンクで emit していく。
+VAD_MAX_UTTERANCE_SEC = float(os.getenv("VAD_MAX_UTTERANCE_SEC", "8.0"))
 
 # 翻訳段 (vLLM / Ollama の OpenAI 互換エンドポイント)。未設定なら原語のまま返す。
 VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "")
@@ -244,34 +245,54 @@ async def translate(ws: WebSocket):
                 segments = await asyncio.to_thread(_vad_segments, audio)
 
                 for seg in segments:
-                    seg_start, seg_end = seg["start"], seg["end"]
-                    abs_end = buf_abs_start + seg_end
-                    if abs_end <= last_emitted_abs:
+                    abs_seg_start = buf_abs_start + seg["start"]
+                    abs_seg_end = buf_abs_start + seg["end"]
+                    if abs_seg_end <= last_emitted_abs:
                         continue
-                    # 発話末尾の後に settle 分の余白があって初めて「区切れた」と認める。
-                    if (len(buf) - seg_end) < settle_samples:
-                        continue
-                    # 過大な発話は max で切る（ライブ字幕用途で 15秒超は不自然）。
-                    if (seg_end - seg_start) > max_utt_samples:
-                        seg_end = seg_start + max_utt_samples
-                        abs_end = buf_abs_start + seg_end
 
-                    audio_slice = audio[seg_start:seg_end]
+                    # この発話のうち、まだ emit していない範囲。
+                    slice_abs_start = max(abs_seg_start, last_emitted_abs)
+                    available = abs_seg_end - slice_abs_start
+                    # 発話末尾に settle 分の余白があれば「完結」と判定。
+                    trailing_silence = len(buf) - seg["end"]
+                    is_complete = trailing_silence >= settle_samples
+
+                    if available >= max_utt_samples:
+                        # 長い発話は完結を待たず、max 単位で順次 emit。
+                        slice_abs_end = slice_abs_start + max_utt_samples
+                    elif is_complete:
+                        # 短〜中尺かつ完結したら残り全部 emit。
+                        slice_abs_end = abs_seg_end
+                    else:
+                        # まだ伸びる可能性があり、max にも届かない → 待つ。
+                        continue
+
+                    s_start = max(0, slice_abs_start - buf_abs_start)
+                    s_end = min(len(buf), slice_abs_end - buf_abs_start)
+                    if s_end - s_start < int(SAMPLE_RATE * 0.3):
+                        last_emitted_abs = slice_abs_end
+                        async with pcm_lock:
+                            state["last_emitted_abs"] = last_emitted_abs
+                        continue
+
+                    audio_slice = audio[s_start:s_end]
                     text = await asyncio.to_thread(transcribe_pcm, audio_slice)
-                    # emit したかどうかに関わらず cursor は進める（同じ発話の二重発火を防ぐ）。
-                    last_emitted_abs = abs_end
+                    last_emitted_abs = slice_abs_end
                     async with pcm_lock:
                         state["last_emitted_abs"] = last_emitted_abs
                     if not text:
                         continue
                     ja = await translate_to_ja(text, requested_model)
                     if not ja:
-                        # メタコメントを弾いた場合などは何も送らない。
                         continue
-                    try:
-                        await ws.send_json({"status": "final", "text": ja})
-                    except Exception:
-                        stop.set()
+                    # 訳文は文単位に分割して順次送り、クライアント側の読書時間を確保する。
+                    for sentence in _split_sentences(ja):
+                        try:
+                            await ws.send_json({"status": "final", "text": sentence})
+                        except Exception:
+                            stop.set()
+                            break
+                    if stop.is_set():
                         break
         except Exception as e:
             print(f"[vot] emit_loop: {type(e).__name__}: {e}", flush=True)
@@ -296,6 +317,15 @@ async def translate(ws: WebSocket):
                 ff.kill()
             except Exception:
                 pass
+
+
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?。！？])")
+
+
+def _split_sentences(text: str) -> list[str]:
+    """日本語訳文を句点単位で分割。1 字幕が長くなりすぎないように。"""
+    parts = [p.strip() for p in _SENTENCE_BOUNDARY.split(text)]
+    return [p for p in parts if p]
 
 
 def _vad_segments(audio: np.ndarray) -> list[dict]:
