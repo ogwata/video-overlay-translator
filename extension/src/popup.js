@@ -20,14 +20,17 @@ function paintToggle() {
     setStatus('<span class="status-on">● Translating</span>');
     $("toggle").textContent = "Stop";
     $("toggle").className = "danger";
+    $("restart").hidden = false;
   } else if (onOtherTab) {
     setStatus(`<span class="status-warn">● Active on tab ${activeTabId}</span>`);
     $("toggle").textContent = "Switch to this tab";
     $("toggle").className = "primary";
+    $("restart").hidden = true;
   } else {
     setStatus('<span class="status-off">○ Idle</span>');
     $("toggle").textContent = "Start";
     $("toggle").className = "primary";
+    $("restart").hidden = true;
   }
 }
 
@@ -98,6 +101,34 @@ $("toggle").addEventListener("click", async () => {
   } catch (e) {
     console.error("[vot/popup] failed to start:", e);
     setStatus(`<span class="status-warn">⚠ ${e.message || e}</span>`);
+    return;
+  }
+  window.close();
+});
+
+// 翻訳が固まったときに WS を張り直すための一発操作。
+// Stop してから新しい streamId で Start するので、サーバ側の WS handler も
+// 完全に作り直され、ffmpeg subprocess も新しく立ち上がる。
+$("restart").addEventListener("click", async () => {
+  if (activeTabId !== currentTabId) return;
+  $("restart").disabled = true;
+  setStatus('<span class="status-warn">… Restarting</span>');
+  try {
+    await chrome.runtime.sendMessage({ type: "STOP_FROM_POPUP" }).catch(() => {});
+    // SW が offscreen を閉じる時間を少しだけ待つ。
+    await new Promise((r) => setTimeout(r, 200));
+    const streamId = await chrome.tabCapture.getMediaStreamId({
+      targetTabId: currentTabId,
+    });
+    await chrome.runtime.sendMessage({
+      type: "START_FROM_POPUP",
+      tabId: currentTabId,
+      streamId,
+    });
+  } catch (e) {
+    console.error("[vot/popup] restart failed:", e);
+    setStatus(`<span class="status-warn">⚠ ${e.message || e}</span>`);
+    $("restart").disabled = false;
     return;
   }
   window.close();

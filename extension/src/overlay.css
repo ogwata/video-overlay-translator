@@ -19,3 +19,4 @@
 #vot-overlay:empty { display: none; }
 #vot-overlay[data-status="interim"] { opacity: 0.6; }   /* 暫定=薄字 */
 #vot-overlay[data-status="final"]   { opacity: 1; }      /* 確定=濃字 */
+#vot-overlay[data-status="stale"]   { opacity: 0.25; transition: opacity 1s; }  /* 古い=非常に薄字 */
