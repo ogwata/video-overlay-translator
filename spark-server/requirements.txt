@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 transformers
 accelerate
+silero-vad
 # システム依存: ffmpeg (apt install ffmpeg)。webm/opus -> PCM の変換に使う。
 #
 # torch は CUDA 対応のため別途インストール (DGX Spark = Grace ARM64 + Blackwell):

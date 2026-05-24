@@ -4,8 +4,9 @@
 #
 # Audio path: WSS で受けた webm/opus を ffmpeg のストリーミング subprocess に流し続け、
 # stdout から PCM(s16le, 16kHz, mono) を連続で読んでリングバッファに積む。
-# 一定周期で最新の数秒だけを取り出して Whisper にかけることで、セッションが長くなっても
-# 計算量が線形に伸びない。
+# その PCM を Silero VAD で発話単位に切り、発話 1 つにつき Whisper を 1 回かける。
+# 固定時間窓だと文の途中で切れて訳し漏れが出やすかったため、HANDOVER §9 のとおり
+# VAD ベースに移行した。
 
 import asyncio
 import os
@@ -14,20 +15,31 @@ import numpy as np
 import torch
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from silero_vad import get_speech_timestamps, load_silero_vad
 from transformers import pipeline
 
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "openai/whisper-large-v3")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
 WHISPER_DTYPE = os.getenv("WHISPER_DTYPE", "float16")
-STT_WINDOW_SEC = float(os.getenv("STT_WINDOW_SEC", "5.0"))     # 何秒ごとに転写を発火するか
-STT_CONTEXT_SEC = float(os.getenv("STT_CONTEXT_SEC", "8.0"))   # 1回の転写で渡す PCM の長さ
-PCM_BUFFER_SEC = float(os.getenv("PCM_BUFFER_SEC", "30.0"))    # リングバッファの長さ
+PCM_BUFFER_SEC = float(os.getenv("PCM_BUFFER_SEC", "30.0"))  # リングバッファの長さ
 SAMPLE_RATE = 16000  # Whisper 入力レート固定。
 MAX_PCM_SAMPLES = int(SAMPLE_RATE * PCM_BUFFER_SEC)
-CONTEXT_SAMPLES = int(SAMPLE_RATE * STT_CONTEXT_SEC)
+
+# --- VAD パラメータ ---
+VAD_TICK_SEC = float(os.getenv("VAD_TICK_SEC", "0.5"))
+# 発話終了から「これで一区切り」と判定するまでの待ち時間 (s)
+VAD_SETTLE_SEC = float(os.getenv("VAD_SETTLE_SEC", "0.5"))
+# Silero の発話確率しきい値 (0.0 〜 1.0)
+VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.5"))
+# 発話を切る最小無音長 (ms)
+VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "400"))
+# 発話の最小長 (ms)
+VAD_MIN_SPEECH_MS = int(os.getenv("VAD_MIN_SPEECH_MS", "250"))
+# 1 発話の最大長 (s)。これより長い発話は強制で切る。
+VAD_MAX_UTTERANCE_SEC = float(os.getenv("VAD_MAX_UTTERANCE_SEC", "15.0"))
 
 # 翻訳段 (vLLM / Ollama の OpenAI 互換エンドポイント)。未設定なら原語のまま返す。
-VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "")  # 例: http://127.0.0.1:11434/v1
+VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "")
 VLLM_MODEL = os.getenv("VLLM_MODEL", "qwen2.5:7b")
 VLLM_TIMEOUT_SEC = float(os.getenv("VLLM_TIMEOUT_SEC", "20.0"))
 TRANSLATE_SYSTEM_PROMPT = (
@@ -40,8 +52,6 @@ TRANSLATE_SYSTEM_PROMPT = (
     "- 入力が既に日本語ならそのまま返す。"
 )
 
-# Few-shot 例。小型モデル (Qwen2.5-7B 等) は出力フォーマットの一貫性に弱いので、
-# in-context で「英語のまま漏らさず・中国語に滑らず・メタコメント無し」を体得させる。
 TRANSLATE_FEWSHOT = [
     (
         "And the more successful ones spent the majority of their money on management productivity.",
@@ -57,10 +67,13 @@ TRANSLATE_FEWSHOT = [
     ),
 ]
 
-app = FastAPI(title="video-overlay-translator gateway")
+# Whisper が短い発話で吐きがちな英語幻聴。VAD で大半防げるが念のため残す。
+WHISPER_HALLUCINATIONS = {
+    "you", "thank you.", "thanks for watching.", "thanks for watching!",
+    ".", "...", "Thank you.", "ご視聴ありがとうございました。",
+}
 
-# 拡張 (chrome-extension://) から /models を読みに来るので CORS を開けておく。
-# Tailscale 内向きの secure context なので allow_origins=* で実害なし。
+app = FastAPI(title="video-overlay-translator gateway")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -74,8 +87,8 @@ _DTYPES = {
     "float32": torch.float32,
 }
 
-# Lazy load: import が GPU 初期化で固まらないように初回リクエスト時に持つ。
 _asr = None
+_vad = None
 
 
 def get_asr():
@@ -90,6 +103,15 @@ def get_asr():
     return _asr
 
 
+def get_vad():
+    """Silero VAD を CPU 上に持つ。GPU は Whisper / LLM のために空けておく。"""
+    global _vad
+    if _vad is None:
+        _vad = load_silero_vad(onnx=False)
+        print("[vot] Silero VAD loaded", flush=True)
+    return _vad
+
+
 @app.get("/healthz")
 def healthz():
     return {
@@ -98,12 +120,12 @@ def healthz():
         "device": WHISPER_DEVICE,
         "mt_base_url": VLLM_BASE_URL or "(disabled)",
         "mt_model": VLLM_MODEL,
+        "segmentation": "vad",
     }
 
 
 @app.get("/models")
 async def list_models():
-    """Ollama / vLLM の /v1/models をそのままプロキシ。拡張のオプションでドロップダウン化する。"""
     if not VLLM_BASE_URL:
         return {"object": "list", "data": []}
     try:
@@ -118,11 +140,9 @@ async def list_models():
 @app.websocket("/translate")
 async def translate(ws: WebSocket):
     await ws.accept()
-    # 接続ごとのモデル切替を許す。?model=qwen2.5:14b 等。未指定は env デフォルト。
     requested_model = ws.query_params.get("model") or VLLM_MODEL
     print(f"[vot] WS connect: model={requested_model}", flush=True)
 
-    # ffmpeg を streaming で起動。stdin に webm を流し続け、stdout から PCM が出続ける。
     ff = await asyncio.create_subprocess_exec(
         "ffmpeg",
         "-loglevel", "error",
@@ -135,7 +155,12 @@ async def translate(ws: WebSocket):
         stderr=asyncio.subprocess.DEVNULL,
     )
 
-    pcm = np.zeros(0, dtype=np.int16)
+    # PCM リングバッファ + セッション開始からの絶対サンプル数。
+    state = {
+        "pcm": np.zeros(0, dtype=np.int16),
+        "total_samples": 0,   # 受信した全 PCM の長さ（リングで捨てた分も含む）
+        "last_emitted_abs": 0,  # この絶対位置より後の発話だけ emit する
+    }
     pcm_lock = asyncio.Lock()
     stop = asyncio.Event()
 
@@ -159,7 +184,6 @@ async def translate(ws: WebSocket):
                 pass
 
     async def read_pcm() -> None:
-        nonlocal pcm
         try:
             while not stop.is_set():
                 raw = await ff.stdout.read(8192)
@@ -167,31 +191,60 @@ async def translate(ws: WebSocket):
                     break
                 arr = np.frombuffer(raw, dtype=np.int16)
                 async with pcm_lock:
-                    pcm = np.concatenate([pcm, arr])
-                    if pcm.size > MAX_PCM_SAMPLES:
-                        pcm = pcm[-MAX_PCM_SAMPLES:]
+                    state["pcm"] = np.concatenate([state["pcm"], arr])
+                    state["total_samples"] += len(arr)
+                    if state["pcm"].size > MAX_PCM_SAMPLES:
+                        state["pcm"] = state["pcm"][-MAX_PCM_SAMPLES:]
         except Exception as e:
             print(f"[vot] read_pcm: {type(e).__name__}: {e}", flush=True)
         finally:
             stop.set()
 
     async def emit_loop() -> None:
+        # VAD を初回利用前にロード（最初の発話までのレイテンシを減らす）。
+        await asyncio.to_thread(get_vad)
+        settle_samples = int(VAD_SETTLE_SEC * SAMPLE_RATE)
+        max_utt_samples = int(VAD_MAX_UTTERANCE_SEC * SAMPLE_RATE)
         try:
             while not stop.is_set():
-                await asyncio.sleep(STT_WINDOW_SEC)
+                await asyncio.sleep(VAD_TICK_SEC)
                 async with pcm_lock:
-                    if pcm.size < SAMPLE_RATE:  # <1秒分しか無ければ待つ
+                    if state["pcm"].size < SAMPLE_RATE:
                         continue
-                    buf = pcm[-CONTEXT_SAMPLES:].copy()
+                    buf = state["pcm"].copy()
+                    buf_abs_start = state["total_samples"] - len(buf)
+                    last_emitted_abs = state["last_emitted_abs"]
+
                 audio = buf.astype(np.float32) / 32768.0
-                text = await asyncio.to_thread(transcribe_pcm, audio)
-                if not text:
-                    continue
-                ja = await translate_to_ja(text, requested_model)
-                try:
-                    await ws.send_json({"status": "final", "text": ja})
-                except Exception:
-                    break
+                segments = await asyncio.to_thread(_vad_segments, audio)
+
+                for seg in segments:
+                    seg_start, seg_end = seg["start"], seg["end"]
+                    abs_end = buf_abs_start + seg_end
+                    if abs_end <= last_emitted_abs:
+                        continue
+                    # 発話末尾の後に settle 分の余白があって初めて「区切れた」と認める。
+                    if (len(buf) - seg_end) < settle_samples:
+                        continue
+                    # 過大な発話は max で切る（ライブ字幕用途で 15秒超は不自然）。
+                    if (seg_end - seg_start) > max_utt_samples:
+                        seg_end = seg_start + max_utt_samples
+                        abs_end = buf_abs_start + seg_end
+
+                    audio_slice = audio[seg_start:seg_end]
+                    text = await asyncio.to_thread(transcribe_pcm, audio_slice)
+                    # emit したかどうかに関わらず cursor は進める（同じ発話の二重発火を防ぐ）。
+                    last_emitted_abs = abs_end
+                    async with pcm_lock:
+                        state["last_emitted_abs"] = last_emitted_abs
+                    if not text:
+                        continue
+                    ja = await translate_to_ja(text, requested_model)
+                    try:
+                        await ws.send_json({"status": "final", "text": ja})
+                    except Exception:
+                        stop.set()
+                        break
         except Exception as e:
             print(f"[vot] emit_loop: {type(e).__name__}: {e}", flush=True)
         finally:
@@ -217,22 +270,24 @@ async def translate(ws: WebSocket):
                 pass
 
 
-SILENCE_RMS_THRESHOLD = float(os.getenv("SILENCE_RMS_THRESHOLD", "0.005"))
-# Whisper が無音/雑音から吐きがちな幻聴。これだけの出力は捨てる。
-WHISPER_HALLUCINATIONS = {
-    "you", "thank you.", "thanks for watching.", "thanks for watching!",
-    ".", "...", "Thank you.", "ご視聴ありがとうございました。",
-}
+def _vad_segments(audio: np.ndarray) -> list[dict]:
+    """音声から発話区間を取り出して [{"start": int, "end": int}, ...] で返す。"""
+    model = get_vad()
+    audio_t = torch.from_numpy(audio)
+    return get_speech_timestamps(
+        audio_t,
+        model,
+        sampling_rate=SAMPLE_RATE,
+        threshold=VAD_THRESHOLD,
+        min_silence_duration_ms=VAD_MIN_SILENCE_MS,
+        min_speech_duration_ms=VAD_MIN_SPEECH_MS,
+        return_seconds=False,
+    )
 
 
 def transcribe_pcm(audio: np.ndarray) -> str:
-    """短い PCM (<= STT_CONTEXT_SEC 秒) を Whisper で転写。
-
-    無音/雑音窓は Whisper が ``you`` などの幻聴を吐くため、RMS で早期に切る。
-    出力テキストも known-hallucination リストと突き合わせて捨てる。
-    """
-    rms = float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
-    if rms < SILENCE_RMS_THRESHOLD:
+    """VAD で切り出した 1 発話分の PCM を Whisper で転写。"""
+    if audio.size < int(SAMPLE_RATE * 0.2):
         return ""
     asr = get_asr()
     result = asr({"array": audio, "sampling_rate": SAMPLE_RATE})
@@ -251,9 +306,6 @@ async def translate_to_ja(text: str, model: str) -> str:
         messages.append({"role": "user", "content": src})
         messages.append({"role": "assistant", "content": tgt})
     messages.append({"role": "user", "content": text})
-    # Qwen3 系は thinking mode が既定で、reasoning に長文 CoT を入れる一方で
-    # `content` を空のまま返してしまう。Ollama 0.7+ は OpenAI 互換層でも
-    # トップレベル `think` パラメータを受け付けるので、Qwen3 検出時は false を渡す。
     payload: dict = {
         "model": model,
         "messages": messages,
@@ -272,8 +324,6 @@ async def translate_to_ja(text: str, model: str) -> str:
             data = resp.json()
             ja = (data["choices"][0]["message"].get("content") or "").strip()
             if not ja:
-                # Thinking が max_tokens を食い潰したか、応答そのものが空。
-                # reasoning にしか中身が無いケースは UI に渡せないので fallback。
                 print(
                     f"[vot] empty content from {model} (finish_reason={data['choices'][0].get('finish_reason')})",
                     flush=True,
@@ -287,6 +337,4 @@ async def translate_to_ja(text: str, model: str) -> str:
 
 if __name__ == "__main__":
     import uvicorn
-    # tailscale serve が 443 で WSS 終端し、ここへは 127.0.0.1 でフォワードする前提。
-    # 他NIC・Tailscale 直への平文露出を塞ぐためループバックに絞る。
     uvicorn.run(app, host="127.0.0.1", port=8000)
