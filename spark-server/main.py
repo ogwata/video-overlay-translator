@@ -250,27 +250,36 @@ async def translate_to_ja(text: str, model: str) -> str:
     for src, tgt in TRANSLATE_FEWSHOT:
         messages.append({"role": "user", "content": src})
         messages.append({"role": "assistant", "content": tgt})
-    user_text = text
-    # Qwen3 系は thinking mode が既定で、reasoning が max_tokens を食い content が空になる。
-    # `/no_think` は Qwen3 のチャットテンプレートが拾う公式タグで、これを末尾に付ける
-    # と thinking を無効化できる。
+    messages.append({"role": "user", "content": text})
+    # Qwen3 系は thinking mode が既定で、reasoning に長文 CoT を入れる一方で
+    # `content` を空のまま返してしまう。Ollama 0.7+ は OpenAI 互換層でも
+    # トップレベル `think` パラメータを受け付けるので、Qwen3 検出時は false を渡す。
+    payload: dict = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.2,
+        "max_tokens": 512,
+    }
     if model.startswith("qwen3"):
-        user_text = f"{text} /no_think"
-    messages.append({"role": "user", "content": user_text})
+        payload["think"] = False
     try:
         async with httpx.AsyncClient(timeout=VLLM_TIMEOUT_SEC) as client:
             resp = await client.post(
                 f"{VLLM_BASE_URL.rstrip('/')}/chat/completions",
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "temperature": 0.2,
-                    "max_tokens": 512,
-                },
+                json=payload,
             )
             resp.raise_for_status()
-            ja = resp.json()["choices"][0]["message"]["content"].strip()
-            return ja or text
+            data = resp.json()
+            ja = (data["choices"][0]["message"].get("content") or "").strip()
+            if not ja:
+                # Thinking が max_tokens を食い潰したか、応答そのものが空。
+                # reasoning にしか中身が無いケースは UI に渡せないので fallback。
+                print(
+                    f"[vot] empty content from {model} (finish_reason={data['choices'][0].get('finish_reason')})",
+                    flush=True,
+                )
+                return text
+            return ja
     except Exception as e:
         print(f"[vot] translate_to_ja failed: {type(e).__name__}: {e}", flush=True)
         return text
