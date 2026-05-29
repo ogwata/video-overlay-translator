@@ -43,6 +43,11 @@ VAD_MAX_UTTERANCE_SEC = float(os.getenv("VAD_MAX_UTTERANCE_SEC", "14.0"))
 # LLM に渡す直近の (原文, 訳文) の組数。多いほど辻褄は合うがプロンプトが伸びる。
 TRANSLATE_HISTORY = int(os.getenv("TRANSLATE_HISTORY", "3"))
 
+# 直前の発話終わりからの無音がこの秒数以上空いたら「ターン交代」とみなし字幕先頭に印を付ける。
+# 話者分離ではなくポーズ検出なので、同一話者の間でも出るし、間髪入れぬ交代は拾えない。
+TURN_GAP_SEC = float(os.getenv("TURN_GAP_SEC", "1.0"))
+TURN_MARKER = os.getenv("TURN_MARKER", "▼")
+
 # 翻訳段 (vLLM / Ollama の OpenAI 互換エンドポイント)。未設定なら原語のまま返す。
 VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "")
 VLLM_MODEL = os.getenv("VLLM_MODEL", "qwen2.5:7b")
@@ -237,6 +242,7 @@ async def translate(ws: WebSocket):
         await asyncio.to_thread(get_vad)
         settle_samples = int(VAD_SETTLE_SEC * SAMPLE_RATE)
         max_utt_samples = int(VAD_MAX_UTTERANCE_SEC * SAMPLE_RATE)
+        turn_gap_samples = int(TURN_GAP_SEC * SAMPLE_RATE)
         try:
             while not stop.is_set():
                 await asyncio.sleep(VAD_TICK_SEC)
@@ -258,6 +264,12 @@ async def translate(ws: WebSocket):
 
                     # この発話のうち、まだ emit していない範囲。
                     slice_abs_start = max(abs_seg_start, last_emitted_abs)
+                    # 直前 emit の終わりからの無音が広ければターン交代の可能性が高い。
+                    # （継続チャンクは abs_seg_start <= last_emitted_abs なので負になり印は付かない）
+                    is_turn = (
+                        last_emitted_abs > 0
+                        and abs_seg_start - last_emitted_abs >= turn_gap_samples
+                    )
                     available = abs_seg_end - slice_abs_start
                     # 発話末尾に settle 分の余白があれば「完結」と判定。
                     trailing_silence = len(buf) - seg["end"]
@@ -296,9 +308,13 @@ async def translate(ws: WebSocket):
                         state["history"].append((text, ja))
                         state["history"] = state["history"][-TRANSLATE_HISTORY:]
                     # 訳文は文単位に分割して順次送り、クライアント側の読書時間を確保する。
+                    # ターン交代なら、その発話の先頭文だけにマーカーを付ける。
+                    first = True
                     for sentence in _split_sentences(ja):
+                        out = f"{TURN_MARKER} {sentence}" if is_turn and first and TURN_MARKER else sentence
+                        first = False
                         try:
-                            await ws.send_json({"status": "final", "text": sentence})
+                            await ws.send_json({"status": "final", "text": out})
                         except Exception:
                             stop.set()
                             break
