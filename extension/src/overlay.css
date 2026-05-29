@@ -2,7 +2,8 @@
 #vot-overlay {
   position: fixed;
   left: 50%;
-  bottom: 8vh;
+  /* 動画プレイヤーの操作バー（自動表示/非表示）と重ならないよう少し上げる。 */
+  bottom: 14vh;
   transform: translateX(-50%);
   max-width: 80vw;
   padding: 0.3em 0.8em;
