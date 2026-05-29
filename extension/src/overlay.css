@@ -1,23 +1,31 @@
-/* 透明オーバーレイ。動画の上に重ねるだけで、ページや動画には干渉しない。 */
+/* 透明オーバーレイ。動画の上に重ねるだけで、ページや動画には干渉しない。
+   外枠 div は位置決めだけで pointer-events:none（クリック素通し）。
+   黒帯/文字は内側 .vot-text に持たせ、そこだけクリックを受ける＝選択・コピー可能。 */
 #vot-overlay {
   position: fixed;
   left: 50%;
-  /* 動画プレイヤーの操作バー（自動表示/非表示）と重ならないよう少し上げる。 */
-  bottom: 14vh;
+  /* プレイヤーのタイムライン（下端）と干渉しないよう下げる。 */
+  bottom: 8vh;
   transform: translateX(-50%);
   max-width: 80vw;
+  text-align: center;
+  pointer-events: none; /* 外枠はクリックを下の動画に通す */
+  z-index: 2147483647;
+}
+#vot-overlay .vot-text {
   padding: 0.3em 0.8em;
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.55);
   color: #fff;
   font-size: clamp(16px, 2.4vw, 30px);
   line-height: 1.4;
-  text-align: center;
-  pointer-events: none; /* クリックを下の動画に通す */
-  z-index: 2147483647;
   white-space: pre-wrap;
+  pointer-events: auto;     /* 文字ピクセルだけクリックを受ける */
+  user-select: text;        /* ドラッグで選択・コピーできる */
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
-#vot-overlay:empty { display: none; }
+#vot-overlay .vot-text:empty { display: none; }  /* 未表示時は黒帯を出さない */
 #vot-overlay[data-status="interim"] { opacity: 0.6; }   /* 暫定=薄字 */
 #vot-overlay[data-status="final"]   { opacity: 1; }      /* 確定=濃字 */
 #vot-overlay[data-status="stale"]   { opacity: 0.25; transition: opacity 1s; }  /* 古い=非常に薄字 */

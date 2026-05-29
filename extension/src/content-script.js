@@ -4,16 +4,21 @@
 //
 // VAD ベースで翻訳が来るようになり「自然な文単位」だが立て続けに到着するため、
 // 読み終わる前に上書きされてしまう。文字数ベースの最小表示時間でキュー消化する。
+// 方針: 1字幕に十分な読書時間を与え、キューが溜まっても捨てない（遅延してでも全部見せる）。
 
-const STALE_AFTER_MS = 10000;        // 新着が来ないとオーバーレイを薄字に
-const MIN_DISPLAY_MS = 2000;         // 1 字幕の最低表示時間
-const MAX_DISPLAY_MS = 8000;         // 1 字幕の最大表示時間
-const PER_CHAR_MS = 70;              // 1 文字あたりの追加表示時間
-const MAX_QUEUE = 4;                 // キュー長上限。溢れたら古い方から捨てる
+const STALE_AFTER_MS = 12000;        // 新着が来ないとオーバーレイを薄字に
+const MIN_DISPLAY_MS = 2200;         // 1 字幕の最低表示時間
+const MAX_DISPLAY_MS = 12000;        // 1 字幕の最大表示時間
+const PER_CHAR_MS = 120;             // 1 文字あたりの追加表示時間（日本語の読書速度に合わせて長め）
 
 const overlay = document.createElement("div");
 overlay.id = "vot-overlay";
 overlay.setAttribute("aria-live", "polite");
+// 黒帯/文字は内側 span に持たせ、クリックを奪うのは文字ピクセルだけにする
+// （span だけ pointer-events:auto。外枠 div は素通し）。これで選択・コピー可能。
+const textSpan = document.createElement("span");
+textSpan.className = "vot-text";
+overlay.appendChild(textSpan);
 document.documentElement.appendChild(overlay);
 
 let queue = [];
@@ -37,7 +42,7 @@ function showNext() {
   const text = queue.shift();
   currentText = text;
   overlay.dataset.status = "final";
-  overlay.textContent = text;
+  textSpan.textContent = text;
   if (staleTimer) clearTimeout(staleTimer);
   staleTimer = setTimeout(() => {
     overlay.dataset.status = "stale";
@@ -59,7 +64,6 @@ chrome.runtime.onMessage.addListener((msg) => {
   // 直前と同じ訳文は無視（VAD でも稀に発生しうる）。
   if (text === currentText || text === queue[queue.length - 1]) return;
   queue.push(text);
-  while (queue.length > MAX_QUEUE) queue.shift();
   if (!showing) showNext();
 });
 
