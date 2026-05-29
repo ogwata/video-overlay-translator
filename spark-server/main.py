@@ -37,7 +37,11 @@ VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "400"))
 # 発話の最小長 (ms)
 VAD_MIN_SPEECH_MS = int(os.getenv("VAD_MIN_SPEECH_MS", "250"))
 # 1 発話の最大長 (s)。これより長い発話は完結を待たずチャンクで emit していく。
-VAD_MAX_UTTERANCE_SEC = float(os.getenv("VAD_MAX_UTTERANCE_SEC", "8.0"))
+# 大きめにして文の途中での機械的ぶつ切りを減らし、VAD の自然な区切り（無音）を優先する。
+VAD_MAX_UTTERANCE_SEC = float(os.getenv("VAD_MAX_UTTERANCE_SEC", "14.0"))
+
+# LLM に渡す直近の (原文, 訳文) の組数。多いほど辻褄は合うがプロンプトが伸びる。
+TRANSLATE_HISTORY = int(os.getenv("TRANSLATE_HISTORY", "3"))
 
 # 翻訳段 (vLLM / Ollama の OpenAI 互換エンドポイント)。未設定なら原語のまま返す。
 VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "")
@@ -186,6 +190,8 @@ async def translate(ws: WebSocket):
         "pcm": np.zeros(0, dtype=np.int16),
         "total_samples": 0,   # 受信した全 PCM の長さ（リングで捨てた分も含む）
         "last_emitted_abs": 0,  # この絶対位置より後の発話だけ emit する
+        # 直近の (原文, 訳文) を会話履歴として LLM に渡し、訳文の辻褄（主語・代名詞・用語）を保つ。
+        "history": [],
     }
     pcm_lock = asyncio.Lock()
     stop = asyncio.Event()
@@ -282,9 +288,13 @@ async def translate(ws: WebSocket):
                         state["last_emitted_abs"] = last_emitted_abs
                     if not text:
                         continue
-                    ja = await translate_to_ja(text, requested_model)
+                    ja = await translate_to_ja(text, requested_model, state["history"])
                     if not ja:
                         continue
+                    # 訳せたものだけ履歴に残す（直近 TRANSLATE_HISTORY 組まで）。
+                    if TRANSLATE_HISTORY > 0:
+                        state["history"].append((text, ja))
+                        state["history"] = state["history"][-TRANSLATE_HISTORY:]
                     # 訳文は文単位に分割して順次送り、クライアント側の読書時間を確保する。
                     for sentence in _split_sentences(ja):
                         try:
@@ -362,12 +372,19 @@ def transcribe_pcm(audio: np.ndarray) -> str:
     return text
 
 
-async def translate_to_ja(text: str, model: str) -> str:
-    """OpenAI 互換 chat endpoint に投げて和訳。失敗時は原文をそのまま返す。"""
+async def translate_to_ja(text: str, model: str, history=None) -> str:
+    """OpenAI 互換 chat endpoint に投げて和訳。失敗時は原文をそのまま返す。
+
+    history は直近の (原文, 訳文) のリスト。会話の流れとして渡すことで、
+    主語・代名詞・固有名詞の訳を前後でそろえ、断片でも辻褄が合うようにする。
+    """
     if not VLLM_BASE_URL:
         return text
     messages = [{"role": "system", "content": TRANSLATE_SYSTEM_PROMPT}]
     for src, tgt in TRANSLATE_FEWSHOT:
+        messages.append({"role": "user", "content": src})
+        messages.append({"role": "assistant", "content": tgt})
+    for src, tgt in history or []:
         messages.append({"role": "user", "content": src})
         messages.append({"role": "assistant", "content": tgt})
     messages.append({"role": "user", "content": text})
