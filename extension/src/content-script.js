@@ -21,6 +21,7 @@ let displayTimer = null;
 let staleTimer = null;
 let showing = false;
 let currentText = "";
+let captureActive = false;  // このタブで翻訳が動いているか
 
 function readingTimeMs(text) {
   // 短い字幕は最低保証を緩める。filler を強引に 2 秒見せる必要は無い。
@@ -47,7 +48,12 @@ function showNext() {
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === "CAPTURE_STATE") {
+    captureActive = !!msg.active;
+    return;
+  }
   if (msg?.type !== "TRANSLATION") return;
+  captureActive = true;  // 翻訳が来ている = このタブはキャプチャ中
   const text = msg.text;
   if (!text) return;
   // 直前と同じ訳文は無視（VAD でも稀に発生しうる）。
@@ -56,3 +62,42 @@ chrome.runtime.onMessage.addListener((msg) => {
   while (queue.length > MAX_QUEUE) queue.shift();
   if (!showing) showNext();
 });
+
+// ページ内で「いま見ている動画」を推定する。
+// 再生中のものを最優先、無ければ画面占有面積が最大のものを返す。
+function findActiveVideo() {
+  const videos = Array.from(document.querySelectorAll("video"));
+  if (videos.length === 0) return null;
+  const playing = videos.find((v) => !v.paused && !v.ended && v.readyState > 2);
+  if (playing) return playing;
+  let best = null;
+  let bestArea = 0;
+  for (const v of videos) {
+    const r = v.getBoundingClientRect();
+    const area = Math.max(0, r.width) * Math.max(0, r.height);
+    if (area > bestArea) {
+      bestArea = area;
+      best = v;
+    }
+  }
+  return best;
+}
+
+// 翻訳中のみ Space を奪って動画を pause/play。
+// X のように操作バーが過敏に隠れる / Space 非対応のプレイヤーの回避策。
+document.addEventListener(
+  "keydown",
+  (e) => {
+    if (e.code !== "Space" || !captureActive) return;
+    const t = e.target;
+    const tag = (t && t.tagName ? t.tagName : "").toLowerCase();
+    if (tag === "input" || tag === "textarea" || (t && t.isContentEditable)) return;
+    const video = findActiveVideo();
+    if (!video) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (video.paused) video.play();
+    else video.pause();
+  },
+  true,  // capture phase: サイト側ハンドラより先に処理する
+);

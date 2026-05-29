@@ -62,13 +62,18 @@ async function startCaptureWithStreamId(tabId, streamId) {
   });
   await setActiveTabId(tabId);
   await setBadge(tabId, true);
+  // content script に「このタブはキャプチャ中」を伝える（Space で pause/play 用）。
+  chrome.tabs.sendMessage(tabId, { type: "CAPTURE_STATE", active: true }).catch(() => {});
 }
 
 async function stopCapture() {
   const active = await getActiveTabId();
   await chrome.runtime.sendMessage({ type: "STOP" }).catch(() => {});
   if (await hasOffscreen()) await chrome.offscreen.closeDocument();
-  if (active != null) await setBadge(active, false);
+  if (active != null) {
+    await setBadge(active, false);
+    chrome.tabs.sendMessage(active, { type: "CAPTURE_STATE", active: false }).catch(() => {});
+  }
   await setActiveTabId(null);
 }
 
