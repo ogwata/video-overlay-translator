@@ -24,4 +24,4 @@ Claude Code 向けの規約は `CLAUDE.md` を参照。
 
 ## ライセンス
 
-未定（公開時に決定）。
+[MIT License](LICENSE)。
