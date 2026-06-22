@@ -1,8 +1,8 @@
 # バージョンは Spark の .venv の実値で固定（Dependabot がここを上げる）。
-fastapi==0.136.1
-uvicorn[standard]==0.47.0
-transformers==5.9.0
-accelerate==1.13.0
+fastapi==0.138.0
+uvicorn[standard]==0.49.0
+transformers==5.12.1
+accelerate==1.14.0
 silero-vad==6.2.1
 # システム依存: ffmpeg (apt install ffmpeg)。webm/opus -> PCM の変換に使う。
 #
