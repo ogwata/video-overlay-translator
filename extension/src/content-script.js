@@ -19,7 +19,25 @@ overlay.setAttribute("aria-live", "polite");
 const textSpan = document.createElement("span");
 textSpan.className = "vot-text";
 overlay.appendChild(textSpan);
-document.documentElement.appendChild(overlay);
+
+// 全画面（Fullscreen API）時は、全画面要素がブラウザのトップレイヤに描かれ、
+// z-index 最大の fixed 要素すら覆い隠す。overlay を全画面要素の中に入れないと
+// 後ろに隠れて見えない。通常時は <html> 直下。fullscreenchange で配置し直す。
+// X が再描画で overlay を消しても、次の表示時に placeOverlay() が貼り直す（自己修復）。
+function placeOverlay() {
+  const host = document.fullscreenElement || document.documentElement;
+  if (overlay.parentElement !== host) host.appendChild(overlay);
+}
+// 全画面切替直後は X がプレイヤー subtree を再描画し、入れたばかりの overlay を
+// 退かすことがある。切替時に加えて少し遅れて数回貼り直し、確実に内側へ入れる。
+function repositionOverlay() {
+  placeOverlay();
+  setTimeout(placeOverlay, 100);
+  setTimeout(placeOverlay, 500);
+}
+placeOverlay();
+document.addEventListener("fullscreenchange", repositionOverlay, true);
+document.addEventListener("webkitfullscreenchange", repositionOverlay, true);
 
 let queue = [];
 let displayTimer = null;
@@ -41,6 +59,7 @@ function showNext() {
   }
   const text = queue.shift();
   currentText = text;
+  placeOverlay();  // 全画面状態に追従（消されていたら貼り直す）
   overlay.dataset.status = "final";
   textSpan.textContent = text;
   if (staleTimer) clearTimeout(staleTimer);
@@ -59,6 +78,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
   if (msg?.type !== "TRANSLATION") return;
   captureActive = true;  // 翻訳が来ている = このタブはキャプチャ中
+  placeOverlay();  // 受信ごとに配置を再確認（全画面切替・X 再描画への自己修復）
   const text = msg.text;
   if (!text) return;
   // 直前と同じ訳文は無視（VAD でも稀に発生しうる）。
