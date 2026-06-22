@@ -101,7 +101,24 @@ video-overlay-translator/
 
 ---
 
-## 9. 未決定事項（実装しながら詰める）
+## 9. 依存アップデート監視の方針
+
+`.github/dependabot.yml` で **pip（`spark-server/requirements.txt`）と docker（Dockerfile ベースイメージ）** を監視する。
+意図的に **自動監視の対象外**にしているものがあり、これらは自動化せず手動で扱う:
+
+- **CUDA 版 torch**（`torch==2.x+cuXXX`）: PyPI ではなく PyTorch の CUDA 専用 index 配布で、ローカルバージョン
+  `+cuXXX` を Dependabot が正しく比較できない。Blackwell ARM64 は torch/CUDA/driver の整合が崩れると動かないため、
+  自動 bump させない。更新は [PyTorch releases] を見て手動で `--index-url` を差し替える。
+- **モデル重み（Whisper / LLM）**: `openai/whisper-large-v3` 等は HF Hub の成果物で semver パッケージではなく、
+  Dependabot/pip では追跡不可。更新は `.env` の `WHISPER_MODEL` / `VLLM_MODEL` を差し替える設計判断で行う。
+- **Whisper の実行系そのものは `transformers` 経由**なので、pip 監視（`transformers` の pin）で既にカバー済み。
+  別途の Whisper 監視は不要。
+
+CUDA ベースイメージへ差し替えた時点で、その base image は docker エコシステムが自動で拾う。
+
+---
+
+## 10. 未決定事項（実装しながら詰める）
 
 - 翻訳 LLM: Qwen 以外の候補。サービング基盤は vLLM か NIM か（DGX Spark は `-dgx-spark` 変種コンテナが必要）。
 - Whisper の常駐方法（プロセス常駐 / コンテナ / バッチ境界の切り方）。
