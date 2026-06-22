@@ -1,6 +1,8 @@
 # --- Claude Code: 個人/環境固有（コミットしない） ---
+# settings.json に tailnet 名・実機ホスト名・絶対パスが入りうるため .claude/ ごと無視する。
+# 将来サニタイズ済みの共有設定を入れたくなったら `.claude/*` + `!.claude/共有ファイル` に切り替える。
 CLAUDE.local.md
-.claude/settings.local.json
+.claude/
 
 # --- 環境変数・秘匿値 ---
 .env
