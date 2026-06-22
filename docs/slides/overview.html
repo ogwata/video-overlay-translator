@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<title>Video Overlay Translator — 技術概要</title>
+<meta name="hz:slide-selector" content=".slide" />
+<meta name="hz:canvas-width" content="1920" />
+<meta name="hz:canvas-height" content="1080" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg:        #0b1220;
+    --panel:     #131d31;
+    --panel2:    #0f1829;
+    --border:    #25324c;
+    --ink:       #e9eff8;
+    --muted:     #9fb1cd;
+    --faint:     #6b7d9c;
+    --cyan:      #3fe0d0;   /* the Spark / GPU */
+    --green:     #5fe39a;   /* the Mac client */
+    --amber:     #f4c66a;   /* network / 注意 */
+    --sans: "Hiragino Kaku Gothic ProN","Hiragino Sans","Helvetica Neue",Arial,"Yu Gothic",sans-serif;
+    --mono: "SF Mono","JetBrains Mono",Menlo,Consolas,"Courier New",monospace;
+  }
+
+  body { background: #060a12; font-family: var(--sans); color: var(--ink); }
+
+  .slide {
+    position: relative;
+    width: 1920px;
+    height: 1080px;
+    background:
+      radial-gradient(1200px 700px at 82% -10%, rgba(63,224,208,0.10), transparent 60%),
+      radial-gradient(1000px 600px at -8% 110%, rgba(95,227,154,0.08), transparent 55%),
+      var(--bg);
+    overflow: hidden;
+    margin: 0 auto 40px;
+    padding: 96px 110px 92px;
+  }
+
+  /* ---- shared chrome ---- */
+  .topbar { display: flex; justify-content: space-between; align-items: baseline; }
+  .kicker {
+    font-family: var(--mono);
+    font-size: 24px; letter-spacing: 4px; text-transform: uppercase;
+    color: var(--cyan);
+  }
+  .pageno { font-family: var(--mono); font-size: 22px; color: var(--faint); letter-spacing: 2px; }
+  .accentline { width: 96px; height: 5px; border-radius: 4px; background: linear-gradient(90deg,var(--cyan),var(--green)); margin: 26px 0 0; }
+
+  .title { font-size: 76px; font-weight: 800; line-height: 1.12; letter-spacing: -0.5px; margin-top: 30px; }
+  .lead  { font-size: 33px; font-weight: 500; color: var(--muted); line-height: 1.55; margin-top: 26px; max-width: 1300px; }
+  .body  { font-size: 30px; font-weight: 400; color: var(--ink); line-height: 1.5; }
+  code, .mono { font-family: var(--mono); }
+  .ck { color: var(--cyan); }
+  .gk { color: var(--green); }
+  .ak { color: var(--amber); }
+
+  .brand-foot {
+    position: absolute; left: 110px; bottom: 54px;
+    font-family: var(--mono); font-size: 22px; color: var(--faint); letter-spacing: 1px;
+  }
+  .brand-foot b { color: var(--muted); font-weight: 500; }
+
+  /* ---- bullets ---- */
+  ul.points { list-style: none; margin-top: 46px; display: grid; gap: 30px; }
+  ul.points > li { position: relative; padding-left: 50px; font-size: 31px; line-height: 1.5; color: var(--ink); max-width: 1500px; }
+  ul.points > li::before {
+    content: ""; position: absolute; left: 8px; top: 16px;
+    width: 16px; height: 16px; border-radius: 4px;
+    background: var(--cyan); transform: rotate(45deg);
+  }
+  ul.points > li .sub { display: block; font-size: 25px; color: var(--muted); margin-top: 8px; line-height: 1.45; }
+
+  /* =========== Slide 1 (title) =========== */
+  .cover { display: flex; flex-direction: column; justify-content: center; padding-top: 0; }
+  .cover .eyebrow { font-family: var(--mono); font-size: 26px; letter-spacing: 5px; color: var(--cyan); text-transform: uppercase; }
+  .cover h1 { font-size: 132px; font-weight: 800; letter-spacing: -2px; line-height: 1.02; margin-top: 30px; }
+  .cover h1 .em { color: var(--cyan); }
+  .cover .sub { font-size: 38px; color: var(--muted); line-height: 1.5; margin-top: 40px; max-width: 1450px; font-weight: 500; }
+  .cover .meta { display: flex; gap: 18px; margin-top: 54px; flex-wrap: wrap; }
+  .chip {
+    font-family: var(--mono); font-size: 24px; color: var(--ink);
+    border: 1px solid var(--border); background: var(--panel);
+    padding: 14px 24px; border-radius: 999px; letter-spacing: 1px;
+  }
+  .chip .dot { color: var(--green); }
+
+  /* =========== Slide 3 (architecture) =========== */
+  .arch { display: grid; grid-template-columns: 1fr 1fr; gap: 36px; margin-top: 52px; align-items: stretch; }
+  .node {
+    border: 1px solid var(--border); border-radius: 20px; padding: 40px 42px;
+    background: linear-gradient(180deg, var(--panel), var(--panel2));
+  }
+  .node.client { border-color: rgba(95,227,154,0.45); }
+  .node.spark  { border-color: rgba(63,224,208,0.45); }
+  .node h3 { font-size: 34px; font-weight: 700; display: flex; align-items: center; gap: 16px; }
+  .node h3 .tag { font-family: var(--mono); font-size: 19px; letter-spacing: 1px; padding: 6px 14px; border-radius: 8px; }
+  .client h3 .tag { background: rgba(95,227,154,0.15); color: var(--green); }
+  .spark  h3 .tag { background: rgba(63,224,208,0.15); color: var(--cyan); }
+  .node ul { list-style: none; margin-top: 26px; display: grid; gap: 18px; }
+  .node ul li { font-size: 26px; line-height: 1.4; color: var(--muted); padding-left: 30px; position: relative; }
+  .node ul li::before { content: "▸"; position: absolute; left: 0; color: var(--faint); }
+  .node ul li b { color: var(--ink); font-weight: 600; }
+
+  .pipe { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 16px; margin-top: 8px;
+          border: 1px dashed var(--border); border-radius: 16px; padding: 28px 40px; background: rgba(244,198,106,0.04); }
+  .pipe .row { display: flex; align-items: center; gap: 22px; font-size: 26px; }
+  .pipe .row .lbl { font-family: var(--mono); font-size: 21px; color: var(--amber); width: 150px; letter-spacing: 1px; }
+  .pipe .row .arrow { flex: 1; height: 2px; background: linear-gradient(90deg, var(--amber), transparent); position: relative; }
+  .pipe .row.down .arrow { background: linear-gradient(270deg, var(--cyan), transparent); }
+  .pipe .row .val { color: var(--ink); }
+  .pipe .row .val .mono { color: var(--muted); font-size: 23px; }
+
+  /* =========== two-column generic =========== */
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; margin-top: 50px; }
+  .cardcol { border: 1px solid var(--border); border-radius: 18px; padding: 38px 40px; background: linear-gradient(180deg,var(--panel),var(--panel2)); }
+  .cardcol h3 { font-size: 30px; font-weight: 700; color: var(--ink); display:flex; align-items:center; gap:14px; }
+  .cardcol h3 .ix { font-family: var(--mono); font-size: 22px; color: var(--cyan); }
+  .cardcol ul { list-style: none; margin-top: 24px; display: grid; gap: 16px; }
+  .cardcol ul li { font-size: 26px; line-height: 1.45; color: var(--muted); padding-left: 28px; position: relative; }
+  .cardcol ul li::before { content: "—"; position: absolute; left: 0; color: var(--faint); }
+  .cardcol ul li b { color: var(--ink); font-weight: 600; }
+
+  /* =========== stack grid (slide 6) =========== */
+  .stackgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 26px; margin-top: 50px; }
+  .scell { border: 1px solid var(--border); border-radius: 16px; padding: 30px 32px; background: var(--panel); }
+  .scell .t { font-family: var(--mono); font-size: 20px; letter-spacing: 2px; color: var(--cyan); text-transform: uppercase; }
+  .scell .v { font-size: 27px; color: var(--ink); margin-top: 14px; line-height: 1.4; }
+  .scell .v span { color: var(--muted); font-size: 23px; }
+
+  @media print {
+    body { background: #fff; }
+    .slide { margin: 0; box-shadow: none; page-break-after: always; break-after: page; }
+    .slide:last-child { page-break-after: auto; break-after: auto; }
+  }
+  @page { size: 1920px 1080px; margin: 0; }
+</style>
+</head>
+<body>
+
+<!-- ============ SLIDE 1 — COVER ============ -->
+<div class="slide cover" data-canvas-width="1920" data-canvas-height="1080">
+  <div class="eyebrow">Chrome 拡張 (MV3) + 推論ゲートウェイ · MIT License</div>
+  <h1>Video Overlay<br><span class="em">Translator</span></h1>
+  <p class="sub">ブラウザで再生中の多言語動画の音声を、ローカル GPU でリアルタイムに日本語へ翻訳し、<br>元動画に触れず透明オーバーレイで重ねて表示する。</p>
+  <div class="meta">
+    <span class="chip"><span class="dot">●</span> the Mac client — 音声取得 + 描画</span>
+    <span class="chip"><span class="dot">●</span> the Spark — STT + 翻訳（CUDA）</span>
+    <span class="chip">Tailscale で一本化</span>
+  </div>
+  <div class="brand-foot"><b>github.com/ogwata/video-overlay-translator</b></div>
+</div>
+
+<!-- ============ SLIDE 2 — WHAT & STANCE ============ -->
+<div class="slide" data-canvas-width="1920" data-canvas-height="1080">
+  <div class="topbar"><div class="kicker">01 — 目的と設計の核</div><div class="pageno">02 / 06</div></div>
+  <h1 class="title">見ながら理解する。<br>焼き込まず、重ねるだけ。</h1>
+  <div class="accentline"></div>
+  <ul class="points">
+    <li>任意サイトで再生中の多言語動画を、<b>見ながら日本語で理解する</b>のが目的。
+      <span class="sub">動画はブラウザ内でローカル再生されたまま、どこにも送らない。</span></li>
+    <li><b>字幕の焼き込み・動画ファイル生成はしない</b>（翻案物の生成を避ける）。再生時オーバーレイのみ・保存しない。
+      <span class="sub">著作権上のスタンス。和訳は透明レイヤーで一時表示するだけ。</span></li>
+    <li>体験は<b>「数秒遅れて流れるライブ字幕」</b>。暫定（薄字）→ 確定（濃字）の2段で出す。
+      <span class="sub">全画面でも見えるよう、字幕は全画面要素の中へ動的に差し込む。</span></li>
+  </ul>
+  <div class="brand-foot">Video Overlay Translator — <b>技術概要</b></div>
+</div>
+
+<!-- ============ SLIDE 3 — ARCHITECTURE ============ -->
+<div class="slide" data-canvas-width="1920" data-canvas-height="1080">
+  <div class="topbar"><div class="kicker">02 — アーキテクチャ</div><div class="pageno">03 / 06</div></div>
+  <h1 class="title">重い処理は Spark、Mac は「拾う・重ねる」だけ</h1>
+  <div class="arch">
+    <div class="node client">
+      <h3><span class="tag">the Mac client</span> Chrome 拡張</h3>
+      <ul>
+        <li><b>service worker / offscreen</b> … tabCapture で音声取得 → Opus 圧縮 → WSS 送信</li>
+        <li><b>content script</b> … 透明オーバーレイ描画に専念（サーバを直接叩かない）</li>
+        <li>ネットワークは SW/offscreen に集約 → mixed content / PNA を回避</li>
+      </ul>
+    </div>
+    <div class="node spark">
+      <h3><span class="tag">the Spark</span> 推論ゲートウェイ（CUDA）</h3>
+      <ul>
+        <li><b>FastAPI + WSS</b> … 音声を受け、和訳テキストを返す</li>
+        <li><b>faster-whisper / Whisper large-v3</b> … 原語 STT</li>
+        <li><b>Qwen 系 LLM・Swallow 70B</b>（vLLM / Ollama 常駐）… 和訳</li>
+      </ul>
+    </div>
+    <div class="pipe">
+      <div class="row up"><span class="lbl">上り</span><div class="arrow"></div><span class="val">音声のみ <span class="mono">Opus 16–24 kbps</span></span></div>
+      <div class="row down"><span class="lbl">下り</span><div class="arrow"></div><span class="val">和訳テキストのみ</span></div>
+    </div>
+  </div>
+  <div class="brand-foot">経路は <b>Tailscale</b>（mesh）。自宅 Wi-Fi でも外出テザリングでも同一エンドポイントで到達。</div>
+</div>
+
+<!-- ============ SLIDE 4 — PIPELINE / MODELS ============ -->
+<div class="slide" data-canvas-width="1920" data-canvas-height="1080">
+  <div class="topbar"><div class="kicker">03 — 推論パイプライン</div><div class="pageno">04 / 06</div></div>
+  <h1 class="title">STT → 翻訳の2段構成</h1>
+  <div class="accentline"></div>
+  <div class="cols">
+    <div class="cardcol">
+      <h3><span class="ix">[1]</span> 音声認識（STT）</h3>
+      <ul>
+        <li><b>Whisper large-v3</b> を CUDA で実行（transformers / PyTorch）</li>
+        <li><b>Silero VAD</b> で発話単位に分割してから 1 発話ずつ転写</li>
+        <li>Whisper の <code class="mono">translate</code> は英訳専用 → 和訳には使えない</li>
+      </ul>
+    </div>
+    <div class="cardcol">
+      <h3><span class="ix">[2]</span> 翻訳（LLM）</h3>
+      <ul>
+        <li><b>Qwen 系 Instruct / Swallow 70B</b> を vLLM・Ollama で常駐</li>
+        <li>専用翻訳モデルより<b>日本語の流暢さ</b>で有利</li>
+        <li>直近の (原文, 訳文) を文脈として渡し、訳の辻褄をそろえる</li>
+        <li>長い無音でターン交代マーカーを付与（簡易な話者切替の目印）</li>
+      </ul>
+    </div>
+  </div>
+  <div class="brand-foot">128GB ユニファイドメモリ（DGX Spark / Blackwell）で「ローカルなのに高品質」が成立。</div>
+</div>
+
+<!-- ============ SLIDE 5 — GUARDS / DESIGN ============ -->
+<div class="slide" data-canvas-width="1920" data-canvas-height="1080">
+  <div class="topbar"><div class="kicker">04 — 設計上の要（ガード）</div><div class="pageno">05 / 06</div></div>
+  <h1 class="title">崩してはいけない 4 つの軸</h1>
+  <div class="accentline"></div>
+  <ul class="points">
+    <li><b>役割分担を崩さない</b> … Mac = 音声取得 + 描画 / Spark = 推論。重い処理は必ず Spark 側。</li>
+    <li><b>エンドポイントは Tailscale MagicDNS 名で一本化</b> … 自宅/外出で切替えない・IP 直打ちしない。<code class="mono">tailscale serve</code> で正規 HTTPS/WSS 終端。</li>
+    <li><b>ネットワーク処理は SW / offscreen に集約</b> … content script は描画専任。mixed content / Private Network Access を回避。</li>
+    <li><b>秘匿値はコミットしない</b> … 実機名・IP・tailnet 名・鍵は <code class="mono">.env</code> / <code class="mono">CLAUDE.local.md</code>。コードでは <code class="mono">*.ts.net</code> プレースホルダ。</li>
+  </ul>
+  <div class="brand-foot">公開方針: 安定・汎用化後に Private → <b>Public</b>（履歴も引き継がれる前提で同基準を徹底）。</div>
+</div>
+
+<!-- ============ SLIDE 6 — STACK / STATUS ============ -->
+<div class="slide" data-canvas-width="1920" data-canvas-height="1080">
+  <div class="topbar"><div class="kicker">05 — スタックと現況</div><div class="pageno">06 / 06</div></div>
+  <h1 class="title">技術スタックと運用</h1>
+  <div class="stackgrid">
+    <div class="scell"><div class="t">Client</div><div class="v">Chrome MV3 拡張<br><span>tabCapture · offscreen · WSS</span></div></div>
+    <div class="scell"><div class="t">Gateway</div><div class="v">FastAPI + WSS<br><span>Python 3.12 · uvicorn</span></div></div>
+    <div class="scell"><div class="t">STT</div><div class="v">Whisper large-v3<br><span>transformers · Silero VAD</span></div></div>
+    <div class="scell"><div class="t">翻訳 LLM</div><div class="v">Qwen / Swallow 70B<br><span>vLLM · Ollama</span></div></div>
+    <div class="scell"><div class="t">Transport</div><div class="v">Tailscale (mesh)<br><span>MagicDNS · Let's Encrypt</span></div></div>
+    <div class="scell"><div class="t">実機</div><div class="v">Apple Silicon ⇄ DGX Spark<br><span>128GB unified · Blackwell</span></div></div>
+  </div>
+  <div class="cols" style="margin-top:40px; grid-template-columns: 1fr 1fr;">
+    <div class="cardcol">
+      <h3><span class="ix">●</span> 運用・品質</h3>
+      <ul>
+        <li>依存監視: <b>Dependabot</b>（pip + docker）。CUDA torch・モデル重みは手動更新</li>
+        <li>ライセンス: <b>MIT</b> / 可視性: <b>Public</b></li>
+      </ul>
+    </div>
+    <div class="cardcol">
+      <h3><span class="ix">●</span> リポジトリ</h3>
+      <ul>
+        <li><code class="mono">github.com/ogwata/video-overlay-translator</code></li>
+        <li>設計の根拠は <code class="mono">HANDOVER.md</code> / ガードは <code class="mono">CLAUDE.md</code></li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
