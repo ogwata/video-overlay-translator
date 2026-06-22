@@ -1,13 +1,15 @@
-fastapi
-uvicorn[standard]
-transformers
-accelerate
-silero-vad
+# バージョンは Spark の .venv の実値で固定（Dependabot がここを上げる）。
+fastapi==0.136.1
+uvicorn[standard]==0.47.0
+transformers==5.9.0
+accelerate==1.13.0
+silero-vad==6.2.1
 # システム依存: ffmpeg (apt install ffmpeg)。webm/opus -> PCM の変換に使う。
 #
 # torch は CUDA 対応のため別途インストール (DGX Spark = Grace ARM64 + Blackwell):
 #   .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cu126
-# Blackwell 対応のため torch >= 2.5 / CUDA >= 12.6 を使う。
+# Blackwell 対応のため torch >= 2.5 / CUDA >= 12.6 を使う。現状 .venv は 2.12.0+cu130。
+# CUDA 専用ビルドのため requirements.txt には固定せず Dependabot 監視からも外す。
 #
 # 翻訳段で追加予定（vLLM は別プロセス常駐想定）:
 # openai  # vLLM の OpenAI 互換クライアントとして
