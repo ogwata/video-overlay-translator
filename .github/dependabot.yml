@@ -1,0 +1,44 @@
+# .github/dependabot.yml
+# 他リポジトリ（book-post-generator / ndlocr-lite-web-ai）と方針を揃える。
+# Dependabot は自動でデフォルトブランチ（main）を対象にするため target-branch は不要。
+#
+# このリポジトリの依存対象:
+#   - pip    … spark-server/requirements.txt（バージョン固定済み。torch は CUDA 別途のため対象外）
+#   - docker … spark-server/Dockerfile のベースイメージ（python:3.12-slim）
+# ※ extension/ は素の MV3 拡張で npm 依存なし。GitHub Actions も未導入のため対象なし。
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/spark-server"
+    schedule:
+      interval: "daily"
+      time: "08:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "deps"
+    # パッチ＋マイナーは1つのPRにまとめ、メジャー（破壊的変更の可能性）は個別PRにする
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "docker"
+    directory: "/spark-server"
+    schedule:
+      interval: "daily"
+      time: "08:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "deps"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
