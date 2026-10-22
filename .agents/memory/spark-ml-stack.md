@@ -7,7 +7,7 @@ metadata:
   originSessionId: a22a3a9c-0ec1-4e07-ba02-131132db0705
 ---
 
-DGX Spark (CLAUDE.local.md の edgexpert-b0a9) は **Grace CPU = ARM64 (aarch64)** + **Blackwell GPU = NVIDIA GB10, compute capability sm_121**。
+DGX Spark は **Grace CPU = ARM64 (aarch64)** + **Blackwell GPU = NVIDIA GB10, compute capability sm_121**。
 
 ここに ML 系の Python パッケージを入れるときに踏みやすい地雷:
 
