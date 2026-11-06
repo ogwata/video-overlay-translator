@@ -7,6 +7,10 @@
 > 自分の環境固有値（実機名・IP・tailnet 名）は gitignore 済みの CLAUDE.local.md にあり、
 > Claude Code 起動時に本ファイルと一緒に読み込まれる。**本ファイルには秘匿値を書かない。**
 
+## 共通指示・共有メモリ・ハンドオフの入口
+
+- 着手時に `/Users/ogwata/dev/oboe/global/AGENTS.md`、`/Users/ogwata/dev/AGENTS.md`、`/Users/ogwata/dev/LLM/AGENTS.md`、`.clinerules/01-記憶.md`、`.agents/memory/MEMORY.md`、`/Users/ogwata/dev/oboe/handoffs/INDEX.md` を確認する。
+
 ---
 
 ## 厳守事項（ガード）
